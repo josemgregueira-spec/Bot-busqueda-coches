@@ -58,13 +58,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "run_search":
         await query.edit_message_text("🔎 Iniciando rastreo en AutoScout24, mobile.de y Kleinanzeigen... Por favor espera.")
         try:
-            # Ejecuta main.py directamente como un proceso independiente
+            # Ejecuta main.py directamente como un proceso independiente del sistema
             subprocess.run(["python", "main.py"], check=True)
             await query.message.reply_text("✅ Rastreo completado. Si se encontraron vehículos nuevos, habrán sido enviados al grupo.")
         except Exception as e:
             await query.message.reply_text(f"❌ Error durante la búsqueda: {e}")
         
-        # Volver a mostrar el menú al terminar
         reply_markup = build_menu(config)
         await query.message.reply_text("⚙️ **Panel de Control:**", reply_markup=reply_markup, parse_mode="Markdown")
 
