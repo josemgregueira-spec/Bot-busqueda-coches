@@ -1,7 +1,7 @@
 import os
 import json
 import logging
-import subprocess
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -58,11 +58,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "run_search":
         await query.edit_message_text("🔎 Iniciando rastreo en AutoScout24, mobile.de y Kleinanzeigen... Por favor espera.")
         try:
-            # Ejecuta main.py directamente como un proceso independiente del sistema
-            subprocess.run(["python", "main.py"], check=True)
-            await query.message.reply_text("✅ Rastreo completado. Si se encontraron vehículos nuevos, habrán sido enviados al grupo.")
+            # Ejecución asíncrona sin bloquear el bot de Telegram
+            process = await asyncio.create_subprocess_exec(
+                "python", "main.py",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+
+            if process.returncode == 0:
+                await query.message.reply_text("✅ Rastreo completado. Si se encontraron vehículos nuevos, habrán sido enviados al grupo.")
+            else:
+                error_msg = stderr.decode().strip() or "Error desconocido durante la ejecución."
+                await query.message.reply_text(f"❌ Error durante la búsqueda:\n`{error_msg[-300:]}`", parse_mode="Markdown")
         except Exception as e:
-            await query.message.reply_text(f"❌ Error durante la búsqueda: {e}")
+            await query.message.reply_text(f"❌ Error al lanzar el proceso: {e}")
         
         reply_markup = build_menu(config)
         await query.message.reply_text("⚙️ **Panel de Control:**", reply_markup=reply_markup, parse_mode="Markdown")
@@ -73,7 +83,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "set_km":
         context.user_data['awaiting'] = 'max_km'
-        await query.message.reply_text("🛣️ Responde a este mensaje con los nuevos **Kilómetros Máximos** (ejemplo: `120000`):")
+        await query.message.reply_text("🛣️ Responde a este mensaje with los nuevos **Kilómetros Máximos** (ejemplo: `120000`):")
 
     elif data == "set_make":
         context.user_data['awaiting'] = 'make'
