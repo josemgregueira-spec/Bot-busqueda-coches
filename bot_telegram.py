@@ -2,6 +2,8 @@ import os
 import json
 import logging
 import asyncio
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -17,6 +19,37 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CONFIG_FILE = "searches_config.json"
+
+
+# --- PARCHE RENDER (Opción B) --------------------------------------------
+# Render, al estar este servicio configurado como "Web Service", espera que
+# el proceso abra el puerto indicado en la variable de entorno PORT y
+# responda a peticiones HTTP. Como este bot solo hace long-polling contra
+# la API de Telegram (no es una app web), Render no detectaba ningún puerto
+# abierto y terminaba matando/reiniciando el proceso en bucle.
+#
+# Este mini servidor HTTP no hace nada funcional: solo responde "OK" a
+# cualquier petición GET para que Render considere el servicio "vivo" y
+# deje de reiniciarlo. Corre en un hilo aparte (daemon) para no bloquear
+# el polling del bot, que sigue siendo el proceso principal.
+def run_health_server():
+    port = int(os.environ.get("PORT", 10000))
+
+    class HealthCheckHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+
+        def log_message(self, format, *args):
+            # Silencia el log de cada ping de Render para no ensuciar la consola
+            pass
+
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    logging.info("Servidor de health-check escuchando en el puerto %s", port)
+    server.serve_forever()
+# ---------------------------------------------------------------------------
+
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -130,6 +163,11 @@ def main_bot():
     if not TELEGRAM_TOKEN:
         print("ERROR: TELEGRAM_TOKEN no configurado.")
         return
+
+    # Arranca el servidor de health-check en un hilo daemon aparte, ANTES de
+    # iniciar el polling. Al ser daemon=True, este hilo no impide que el
+    # proceso termine si el hilo principal termina.
+    threading.Thread(target=run_health_server, daemon=True).start()
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler(["start", "config", "menu"], start))
