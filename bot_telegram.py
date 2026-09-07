@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import subprocess
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -10,7 +11,6 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-import main  # Importa tu script de scraping existente
 
 # Configuración de logs
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -22,7 +22,7 @@ def load_config():
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    return {"make": "Audi", "model": "", "max_price": "20000", "max_km": "150000"}
+    return {"make": "BMW", "model": "318", "max_price": "20000", "max_km": "120000"}
 
 def save_config(config):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -58,13 +58,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "run_search":
         await query.edit_message_text("🔎 Iniciando rastreo en AutoScout24, mobile.de y Kleinanzeigen... Por favor espera.")
         try:
-            main.main()  # Ejecuta el scraper principal
+            # Ejecuta main.py directamente como un proceso independiente
+            subprocess.run(["python", "main.py"], check=True)
             await query.message.reply_text("✅ Rastreo completado. Si se encontraron vehículos nuevos, habrán sido enviados al grupo.")
         except Exception as e:
             await query.message.reply_text(f"❌ Error durante la búsqueda: {e}")
-        # Recargar el menú
+        
+        # Volver a mostrar el menú al terminar
         reply_markup = build_menu(config)
-        await query.message.reply_text("⚙️ **Panel de Control:**", reply_markup=reply_markup)
+        await query.message.reply_text("⚙️ **Panel de Control:**", reply_markup=reply_markup, parse_mode="Markdown")
 
     elif data == "set_price":
         context.user_data['awaiting'] = 'max_price'
@@ -80,7 +82,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "set_model":
         context.user_data['awaiting'] = 'model'
-        await query.message.reply_text("📝 Responde a este mensaje con el **Modelo** deseado (ejemplo: `A4`, `320`, o escribe `ninguno` para borrar):")
+        await query.message.reply_text("📝 Responde a este mensaje con el **Modelo** deseado (ejemplo: `318`, `A4`, o escribe `ninguno` para borrar):")
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     awaiting = context.user_data.get('awaiting')
