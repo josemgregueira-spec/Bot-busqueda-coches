@@ -1,4 +1,4 @@
 requests
 beautifulsoup4
 playwright
-python-telegram-bot>=20.0
+python-telegram-bot
