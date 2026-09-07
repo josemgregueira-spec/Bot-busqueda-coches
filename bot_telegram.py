@@ -47,7 +47,11 @@ def build_menu(config):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_config()
     reply_markup = build_menu(config)
-    await update.message.reply_text("⚙️ **Panel de Control de Búsqueda de Vehículos REBU**\n\nUsa los botones para modificar los filtros:", reply_markup=reply_markup, parse_mode="Markdown")
+    await update.message.reply_text(
+        "⚙️ **Panel de Control de Búsqueda de Vehículos REBU**\n\nUsa los botones para modificar los filtros:",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -58,22 +62,33 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "run_search":
         await query.edit_message_text("🔎 Iniciando rastreo en AutoScout24, mobile.de y Kleinanzeigen... Por favor espera.")
         try:
-            # Ejecución asíncrona sin bloquear el bot de Telegram
+            # Lanza main.py como proceso independiente en segundo plano
             process = await asyncio.create_subprocess_exec(
                 "python", "main.py",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            stdout, stderr = await process.communicate()
+            
+            # Establece un tiempo máximo de espera de 180 segundos (3 minutos)
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=180.0)
 
             if process.returncode == 0:
-                await query.message.reply_text("✅ Rastreo completado. Si se encontraron vehículos nuevos, habrán sido enviados al grupo.")
+                out = stdout.decode().strip() or "Búsqueda finalizada sin errores."
+                await query.message.reply_text(f"✅ **Rastreo completado:**\n```\n{out[-300:]}\n```", parse_mode="Markdown")
             else:
-                error_msg = stderr.decode().strip() or "Error desconocido durante la ejecución."
-                await query.message.reply_text(f"❌ Error durante la búsqueda:\n`{error_msg[-300:]}`", parse_mode="Markdown")
+                err = stderr.decode().strip() or stdout.decode().strip() or "Error en script."
+                await query.message.reply_text(f"❌ **Fallo al ejecutar main.py:**\n```\n{err[-400:]}\n```", parse_mode="Markdown")
+
+        except asyncio.TimeoutError:
+            try:
+                process.kill()
+            except Exception:
+                pass
+            await query.message.reply_text("⏱️ **Tiempo agotado:** El rastreador tardó más de 3 minutos y fue detenido. Revisa la configuración `headless` de Playwright en `main.py`.")
         except Exception as e:
             await query.message.reply_text(f"❌ Error al lanzar el proceso: {e}")
         
+        # Volver a mostrar el menú interactivo tras finalizar
         reply_markup = build_menu(config)
         await query.message.reply_text("⚙️ **Panel de Control:**", reply_markup=reply_markup, parse_mode="Markdown")
 
@@ -83,7 +98,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "set_km":
         context.user_data['awaiting'] = 'max_km'
-        await query.message.reply_text("🛣️ Responde a este mensaje with los nuevos **Kilómetros Máximos** (ejemplo: `120000`):")
+        await query.message.reply_text("🛣️ Responde a este mensaje con los nuevos **Kilómetros Máximos** (ejemplo: `120000`):")
 
     elif data == "set_make":
         context.user_data['awaiting'] = 'make'
