@@ -53,10 +53,11 @@ def load_config():
     return read_json(
         CONFIG_FILE,
         {
-            "make": "Volkswagen",
-            "model": "Golf",
+            "make": "bmw",
+            "model": "3er",
+            "version": "316d",
             "max_price": "20000",
-            "max_km": "120000",
+            "max_km": "150000",
             "zip_code": "",
             "radius": "",
         },
@@ -105,7 +106,6 @@ def number(value):
 
 
 def blocked(content):
-    """Detecta si la respuesta es un captcha/challenge anti-bot en vez del listado real."""
     content = content.lower()
     markers = (
         "captcha",
@@ -120,7 +120,6 @@ def blocked(content):
 
 
 def has_deductible_vat(text):
-    """Filtro REBU: True si el anuncio indica IVA deducible (§25a UStG no aplica)."""
     text = " ".join(text.lower().split())
     markers = (
         "mwst. ausweisbar",
@@ -210,9 +209,12 @@ def make_car(platform, base_url, item, title_selector, price_selector):
 
 def matches_config(car, config):
     title = norm(car["title"])
+    # "version" (p.ej. 316d) es lo que debe aparecer en el título;
+    # "model" (p.ej. 3er) es lo que entienden las webs en sus buscadores.
+    match_term = config.get("version") or config.get("model", "")
     return all(
         norm(value) in title
-        for value in (config.get("make", ""), config.get("model", ""))
+        for value in (config.get("make", ""), match_term)
         if norm(value)
     )
 
@@ -244,11 +246,14 @@ def qualifies(car, config):
 def fetch_autoscout(config, session, max_pages=MAX_PAGES):
     make = config.get("make", "").strip().lower()
     model = config.get("model", "").strip().lower()
-    if not make or not model:
-        log.error("AutoScout24 requiere make y model.")
+    if not make:
+        log.error("AutoScout24 requiere make.")
         return []
 
-    url = f"https://www.autoscout24.de/lst/{quote(make, safe='-')}/{quote(model, safe='-')}"
+    url_make_only = f"https://www.autoscout24.de/lst/{quote(make, safe='-')}"
+    url_with_model = f"{url_make_only}/{quote(model, safe='-')}" if model else url_make_only
+    fallback_used = False
+
     cars = []
 
     for page in range(1, max_pages + 1):
@@ -267,7 +272,14 @@ def fetch_autoscout(config, session, max_pages=MAX_PAGES):
         }
         params = {k: v for k, v in params.items() if v is not None}
 
-        response = get(session, url, params, "AutoScout24")
+        request_url = url_make_only if fallback_used else url_with_model
+        response = get(session, request_url, params, "AutoScout24")
+
+        if response is None and request_url != url_make_only:
+            print("[AutoScout24] Ruta con modelo no válida; probando solo con la marca.", flush=True)
+            fallback_used = True
+            response = get(session, url_make_only, params, "AutoScout24")
+
         if not response:
             break
 
@@ -319,12 +331,6 @@ def click_first_visible(locator, timeout=6000):
 
 
 def accept_mobile_cookies(page):
-    """
-    Cierra el banner de consentimiento de cookies de mobile.de. Muchas webs
-    alemanas muestran este banner DENTRO de un <iframe> (OneTrust, Consent-
-    manager, etc.), así que probamos primero en cada iframe de la página y
-    solo si ninguno tiene el botón, probamos en el documento principal.
-    """
     button_pattern = re.compile("Alle akzeptieren|Akzeptieren|Zustimmen|Accept all", re.IGNORECASE)
 
     for frame in page.frames:
@@ -471,7 +477,8 @@ def fetch_mobile_de(config, _session=None, max_pages=MAX_PAGES):
 # ---------------------------------------------------------------------------
 
 def fetch_kleinanzeigen(config, session, max_pages=MAX_PAGES):
-    query = " ".join(filter(None, (config.get("make", "").strip(), config.get("model", "").strip())))
+    match_term = (config.get("version") or config.get("model", "")).strip()
+    query = " ".join(filter(None, (config.get("make", "").strip(), match_term)))
     if not query:
         return []
 
