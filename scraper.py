@@ -209,12 +209,10 @@ def make_car(platform, base_url, item, title_selector, price_selector):
 
 def matches_config(car, config):
     title = norm(car["title"])
-    # "version" (p.ej. 316d) es lo que debe aparecer en el título;
-    # "model" (p.ej. 3er) es lo que entienden las webs en sus buscadores.
-    match_term = config.get("version") or config.get("model", "")
+    # Si el modelo está vacío, vale cualquier modelo de esa marca.
     return all(
         norm(value) in title
-        for value in (config.get("make", ""), match_term)
+        for value in (config.get("make", ""), config.get("model", ""))
         if norm(value)
     )
 
