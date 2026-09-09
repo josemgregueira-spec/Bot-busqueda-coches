@@ -1,8 +1,9 @@
 {
-  "make": "Volkswagen",
-  "model": "Golf",
+  "make": "bmw",
+  "model": "",
   "max_price": "20000",
-  "max_km": "120000",
+  "max_km": "150000",
   "zip_code": "",
-  "radius": ""
+  "radius": "",
+  "vigilancia": false
 }
