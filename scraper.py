@@ -209,7 +209,6 @@ def make_car(platform, base_url, item, title_selector, price_selector):
 
 def matches_config(car, config):
     title = norm(car["title"])
-    # Si el modelo está vacío, vale cualquier modelo de esa marca.
     return all(
         norm(value) in title
         for value in (config.get("make", ""), config.get("model", ""))
@@ -382,7 +381,7 @@ def mobile_select_value(page, field_pattern, field_label, value):
 def fetch_mobile_de(config, _session=None, max_pages=MAX_PAGES):
     make = config.get("make", "").strip()
     model = config.get("model", "").strip()
-        if not make:
+    if not make:
         log.error("mobile.de requiere make.")
         return []
 
@@ -400,7 +399,10 @@ def fetch_mobile_de(config, _session=None, max_pages=MAX_PAGES):
 
         try:
             print("[mobile.de] Arrancando Chromium...", flush=True)
-            browser = playwright.chromium.launch(headless=True)
+            browser = playwright.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+            )
             context = browser.new_context(locale="de-DE", user_agent=HEADERS["User-Agent"])
             page = context.new_page()
 
@@ -476,7 +478,7 @@ def fetch_mobile_de(config, _session=None, max_pages=MAX_PAGES):
 # ---------------------------------------------------------------------------
 
 def fetch_kleinanzeigen(config, session, max_pages=MAX_PAGES):
- query = " ".join(filter(None, (config.get("make", "").strip(), config.get("model", "").strip())))
+    query = " ".join(filter(None, (config.get("make", "").strip(), config.get("model", "").strip())))
     if not query:
         return []
 
