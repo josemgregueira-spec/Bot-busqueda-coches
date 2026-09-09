@@ -476,8 +476,7 @@ def fetch_mobile_de(config, _session=None, max_pages=MAX_PAGES):
 # ---------------------------------------------------------------------------
 
 def fetch_kleinanzeigen(config, session, max_pages=MAX_PAGES):
-    match_term = (config.get("version") or config.get("model", "")).strip()
-    query = " ".join(filter(None, (config.get("make", "").strip(), match_term)))
+ query = " ".join(filter(None, (config.get("make", "").strip(), config.get("model", "").strip())))
     if not query:
         return []
 
