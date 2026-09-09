@@ -417,7 +417,8 @@ def fetch_mobile_de(config, _session=None, max_pages=MAX_PAGES):
 
             accept_mobile_cookies(page)
             mobile_select_value(page, "Marke", "marca", make)
-            mobile_select_value(page, "Modell", "modelo", model)
+            if model:
+                mobile_select_value(page, "Modell", "modelo", model)
 
             page.wait_for_timeout(1500)
 
