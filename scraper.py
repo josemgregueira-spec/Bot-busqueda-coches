@@ -54,8 +54,8 @@ def load_config():
         CONFIG_FILE,
         {
             "make": "bmw",
-            "model": "3er",
-            "version": "316d",
+            "model": "",
+            "vigilancia": False,
             "max_price": "20000",
             "max_km": "150000",
             "zip_code": "",
