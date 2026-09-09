@@ -382,8 +382,8 @@ def mobile_select_value(page, field_pattern, field_label, value):
 def fetch_mobile_de(config, _session=None, max_pages=MAX_PAGES):
     make = config.get("make", "").strip()
     model = config.get("model", "").strip()
-    if not make or not model:
-        log.error("mobile.de requiere make y model.")
+        if not make:
+        log.error("mobile.de requiere make.")
         return []
 
     try:
