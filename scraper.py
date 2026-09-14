@@ -219,14 +219,14 @@ def matches_config(car, config):
 def within_limits(car, config):
     max_price = number(config.get("max_price", ""))
     price = number(car["price"])
-    if max_price is not None and (price is None or price > max_price):
+    if max_price is not None and price is not None and price > max_price:
         return False
 
     max_km = number(config.get("max_km", ""))
     if max_km is not None:
         match = re.search(r"(?:\d{1,3}(?:[.\s]\d{3})+|\d+)\s*km", car["_listing_text"], re.I)
         km = int(re.sub(r"\D", "", match.group(0))) if match else None
-        if km is None or km > max_km:
+        if km is not None and km > max_km:
             return False
 
     return True
@@ -272,7 +272,7 @@ def fetch_autoscout(config, session, max_pages=MAX_PAGES):
         request_url = url_make_only if fallback_used else url_with_model
         response = get(session, request_url, params, "AutoScout24")
 
-        if response is None and request_url != url_make_only:
+        if response is None and request_url != url_with_model:
             print("[AutoScout24] Ruta con modelo no válida; probando solo con la marca.", flush=True)
             fallback_used = True
             response = get(session, url_make_only, params, "AutoScout24")
@@ -307,88 +307,21 @@ def fetch_autoscout(config, session, max_pages=MAX_PAGES):
 
 
 # ---------------------------------------------------------------------------
-# mobile.de (requiere Playwright: el listado se renderiza con JS)
+# mobile.de (Playwright + URL Directa + Stealth)
 # ---------------------------------------------------------------------------
 
-def click_first_visible(locator, timeout=6000):
-    try:
-        count = locator.count()
-    except Exception:
-        return False
-
-    for index in range(count):
-        candidate = locator.nth(index)
-        try:
-            if candidate.is_visible():
-                candidate.click(timeout=timeout)
-                return True
-        except Exception:
-            continue
-    return False
-
-
-def accept_mobile_cookies(page):
-    button_pattern = re.compile("Alle akzeptieren|Akzeptieren|Zustimmen|Accept all", re.IGNORECASE)
-
-    for frame in page.frames:
-        try:
-            locator = frame.get_by_text(button_pattern)
-            if locator.count() and click_first_visible(locator, timeout=4000):
-                print("[mobile.de] Banner de cookies cerrado (iframe).", flush=True)
-                return True
-        except Exception:
-            continue
-
-    try:
-        locator = page.get_by_text(button_pattern)
-        if locator.count() and click_first_visible(locator, timeout=4000):
-            print("[mobile.de] Banner de cookies cerrado (DOM principal).", flush=True)
-            return True
-    except Exception:
-        pass
-
-    print("[mobile.de] No se encontró banner de cookies (o ya estaba cerrado).", flush=True)
-    return False
-
-
-def mobile_select_value(page, field_pattern, field_label, value):
-    print(f"[mobile.de] Seleccionando {field_label} = {value}...", flush=True)
-
-    field_locator = page.get_by_text(re.compile(field_pattern, re.IGNORECASE), exact=False)
-    if not click_first_visible(field_locator):
-        raise RuntimeError(f"No se encontró el selector de {field_label}.")
-
-    page.wait_for_timeout(400)
-    inputs = page.locator("input:visible")
-    if not inputs.count():
-        raise RuntimeError(f"No se abrió el campo de {field_label}.")
-
-    target_input = inputs.nth(inputs.count() - 1)
-    target_input.fill(value)
-
-    try:
-        page.wait_for_selector(f"text=/^{re.escape(value)}/i", timeout=4000)
-    except Exception:
-        pass
-
-    option = page.get_by_text(re.compile(rf"^{re.escape(value)}", re.IGNORECASE))
-    if not click_first_visible(option):
-        raise RuntimeError(f"mobile.de no ofreció una opción para {field_label}: {value}")
-
-    print(f"[mobile.de] {field_label} seleccionado.", flush=True)
-
-
 def fetch_mobile_de(config, _session=None, max_pages=MAX_PAGES):
-    make = config.get("make", "").strip()
-    model = config.get("model", "").strip()
+    make = config.get("make", "").strip().lower()
+    model = config.get("model", "").strip().lower()
     if not make:
         log.error("mobile.de requiere make.")
         return []
 
     try:
         from playwright.sync_api import sync_playwright
+        from playwright_stealth import stealth_sync
     except ImportError:
-        log.error("Playwright no está instalado (pip install playwright + playwright install chromium).")
+        log.error("Falta instalar dependencias de Playwright/Stealth.")
         return []
 
     cars = []
@@ -401,28 +334,48 @@ def fetch_mobile_de(config, _session=None, max_pages=MAX_PAGES):
             print("[mobile.de] Arrancando Chromium...", flush=True)
             browser = playwright.chromium.launch(
                 headless=True,
-                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled",
+                ]
             )
-            context = browser.new_context(locale="de-DE", user_agent=HEADERS["User-Agent"])
+            context = browser.new_context(
+                locale="de-DE",
+                user_agent=HEADERS["User-Agent"],
+                viewport={"width": 1920, "height": 1080}
+            )
             page = context.new_page()
+            stealth_sync(page)
 
-            def block_heavy(route):
-                if route.request.resource_type in ("image", "stylesheet", "font", "media"):
-                    route.abort()
-                else:
-                    route.continue_()
+            # Construir URL directa con parámetros
+            base_search_url = "https://suchen.mobile.de/fahrzeuge/search.html?isSearchRequest=true&s=Car&vc=Car"
+            query_params = {
+                "cn": "DE",
+                "mk": make,
+                "mo": model if model else None,
+                "prx": config.get("max_price") or None,
+                "mlx": config.get("max_km") or None,
+                "zip": config.get("zip_code") or None,
+                "rd": config.get("radius") or None,
+                "s": "Order_By_Creation_Date_Desc",
+            }
+            query_params = {k: v for k, v in query_params.items() if v is not None}
+            search_url = f"{base_search_url}&{urlencode(query_params)}"
 
-            page.route("**/*", block_heavy)
+            print("[mobile.de] Cargando búsqueda directa...", flush=True)
+            page.goto(search_url, wait_until="domcontentloaded", timeout=35000)
+            page.wait_for_timeout(2000)
 
-            print("[mobile.de] Cargando página de búsqueda...", flush=True)
-            page.goto("https://www.mobile.de/fahrzeuge/search.html", wait_until="domcontentloaded", timeout=30000)
-
-            accept_mobile_cookies(page)
-            mobile_select_value(page, "Marke", "marca", make)
-            if model:
-                mobile_select_value(page, "Modell", "modelo", model)
-
-            page.wait_for_timeout(1500)
+            # Aceptar cookies si aparecen
+            try:
+                cookie_btn = page.locator("button:has-text('Alle akzeptieren'), button:has-text('Akzeptieren')").first
+                if cookie_btn.is_visible(timeout=3000):
+                    cookie_btn.click()
+                    print("[mobile.de] Banner de cookies aceptado.", flush=True)
+            except Exception:
+                pass
 
             for page_number in range(1, max_pages + 1):
                 print(f"[mobile.de] Leyendo página {page_number}/{max_pages}...", flush=True)
@@ -433,7 +386,7 @@ def fetch_mobile_de(config, _session=None, max_pages=MAX_PAGES):
                     break
 
                 soup = BeautifulSoup(content, "html.parser")
-                listings = soup.select('[data-testid="result-listing"], div.cBox-body--resultitem')
+                listings = soup.select('[data-testid="result-listing"], div.cBox-body--resultitem, article')
 
                 if not listings:
                     print(f"[mobile.de] Sin tarjetas de resultado en página {page_number}.", flush=True)
@@ -453,12 +406,13 @@ def fetch_mobile_de(config, _session=None, max_pages=MAX_PAGES):
                 if page_number == max_pages:
                     break
 
-                next_button = page.locator('[data-testid="pagination-next-button"], a[rel="next"]')
-                if not click_first_visible(next_button):
+                next_button = page.locator('[data-testid="pagination-next-button"], a[rel="next"]').first
+                if next_button.is_visible():
+                    next_button.click()
+                    page.wait_for_load_state("domcontentloaded")
+                    page.wait_for_timeout(2000)
+                else:
                     break
-
-                page.wait_for_load_state("domcontentloaded")
-                page.wait_for_timeout(1200)
 
         except Exception as error:
             log.error("No se pudo automatizar mobile.de: %s", error)
@@ -619,3 +573,7 @@ def run_pipeline():
 
     save_seen(seen)
     print(f"Ciclo finalizado. Avisos enviados: {sent}", flush=True)
+
+
+if __name__ == "__main__":
+    run_pipeline()
