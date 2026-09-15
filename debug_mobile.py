@@ -8,6 +8,12 @@ Uso (en el servidor, dentro de la carpeta del proyecto):
 """
 from playwright.sync_api import sync_playwright
 
+try:
+    from playwright_stealth import stealth_sync
+    STEALTH_AVAILABLE = True
+except ImportError:
+    STEALTH_AVAILABLE = False
+
 URL = "https://www.mobile.de/fahrzeuge/search.html"
 
 
@@ -16,6 +22,12 @@ def main():
         browser = playwright.chromium.launch(headless=True)
         context = browser.new_context(locale="de-DE")
         page = context.new_page()
+
+        if STEALTH_AVAILABLE:
+            stealth_sync(page)
+            print("Modo stealth ACTIVADO para esta prueba.\n")
+        else:
+            print("playwright-stealth no disponible; prueba SIN stealth.\n")
 
         print(f"Cargando {URL} ...")
         page.goto(URL, wait_until="networkidle", timeout=30000)
