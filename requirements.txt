@@ -1,4 +1,5 @@
 requests
 beautifulsoup4
-playwright
 python-telegram-bot[job-queue]
+playwright
+playwright-stealth
