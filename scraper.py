@@ -437,7 +437,7 @@ def fetch_mobile_de(config, _session=None, max_pages=MAX_PAGES):
     # donde corre este script (no basta con instalarlo en tu PC local), se
     # avisa y se continúa sin él en vez de romper todo el pipeline.
     try:
-        from playwright_stealth import stealth_sync
+        from playwright_stealth import Stealth
         stealth_available = True
     except ImportError:
         stealth_available = False
@@ -460,7 +460,7 @@ def fetch_mobile_de(config, _session=None, max_pages=MAX_PAGES):
             page = context.new_page()
 
             if stealth_available:
-                stealth_sync(page)
+                Stealth().apply_stealth_sync(page)
                 print("[mobile.de] Modo stealth activado.", flush=True)
 
             def block_heavy(route):
@@ -558,6 +558,12 @@ def fetch_kleinanzeigen(config, _session=None, max_pages=KLEINANZEIGEN_MAX_PAGES
         log.error("Playwright no está instalado (pip install playwright + playwright install chromium).")
         return []
 
+    try:
+        from playwright_stealth import Stealth
+        stealth_available = True
+    except ImportError:
+        stealth_available = False
+
     slug = quote(re.sub(r"\s+", "-", query.strip().lower()), safe="-")
     cars = []
 
@@ -568,6 +574,9 @@ def fetch_kleinanzeigen(config, _session=None, max_pages=KLEINANZEIGEN_MAX_PAGES
             browser = playwright.chromium.launch(headless=True)
             context = browser.new_context(locale="de-DE", user_agent=HEADERS["User-Agent"])
             page = context.new_page()
+
+            if stealth_available:
+                Stealth().apply_stealth_sync(page)
 
             url = f"https://www.kleinanzeigen.de/s-autos/{slug}/k0c216"
             print(f"[Kleinanzeigen] Cargando {url}...", flush=True)
