@@ -580,7 +580,12 @@ def fetch_kleinanzeigen(config, _session=None, max_pages=KLEINANZEIGEN_MAX_PAGES
 
             url = f"https://www.kleinanzeigen.de/s-autos/{slug}/k0c216"
             print(f"[Kleinanzeigen] Cargando {url}...", flush=True)
-            page.goto(url, wait_until="networkidle", timeout=30000)
+            # "networkidle" falla a menudo en webs modernas (analíticas,
+            # anuncios, websockets de fondo que nunca dejan la red "en
+            # silencio"). En vez de eso, esperamos solo a que el HTML básico
+            # cargue y luego a que aparezcan los enlaces de anuncio reales,
+            # que es lo que de verdad necesitamos.
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
             human_pause(2.0, 4.0)
 
             if blocked(page.content()):
@@ -589,6 +594,16 @@ def fetch_kleinanzeigen(config, _session=None, max_pages=KLEINANZEIGEN_MAX_PAGES
                     "anti-bot). Se detiene esta plataforma en este ciclo."
                 )
                 return []
+
+            try:
+                page.wait_for_selector('a[href*="/s-anzeige/"]', timeout=15000)
+            except Exception:
+                print(
+                    "[Kleinanzeigen] No aparecieron enlaces de anuncio tras 15s "
+                    "de espera (puede que no haya resultados, o que la página "
+                    "tarde más de lo esperado en cargar).",
+                    flush=True,
+                )
 
             # Se extraen los datos directamente en el navegador (más fiable
             # que descargar el HTML y volver a parsearlo aparte), subiendo
