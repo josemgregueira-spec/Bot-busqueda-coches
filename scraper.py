@@ -2,6 +2,7 @@ import html
 import json
 import logging
 import os
+import random
 import re
 import time
 import unicodedata
@@ -14,7 +15,17 @@ from bs4 import BeautifulSoup
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID", "")
 MAX_PAGES = int(os.getenv("MAX_PAGES", "3"))
+# Kleinanzeigen bloquea mucho más rápido que las otras dos plataformas
+# (a veces tras solo 2-3 anuncios), así que por defecto se le pide bastante
+# menos y con pausas más largas. Ajustable con la variable de entorno.
+KLEINANZEIGEN_MAX_PAGES = int(os.getenv("KLEINANZEIGEN_MAX_PAGES", "1"))
 SEEN_RETENTION_DAYS = int(os.getenv("SEEN_RETENTION_DAYS", "90"))
+
+
+def human_pause(min_seconds, max_seconds):
+    """Pausa aleatoria para que el patrón de peticiones no sea idéntico
+    (y por tanto fácilmente detectable) en cada ciclo."""
+    time.sleep(random.uniform(min_seconds, max_seconds))
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = BASE_DIR / "searches_config.json"
@@ -115,6 +126,10 @@ def blocked(content):
         "bestätigen sie, dass sie ein mensch sind",
         "zugriff verweigert",
         "ungewöhnlicher datenverkehr",
+        "roboter",
+        "bot-erkennung",
+        "please verify",
+        "pardon our interruption",
     )
     return any(marker in content for marker in markers)
 
@@ -209,6 +224,7 @@ def make_car(platform, base_url, item, title_selector, price_selector):
 
 def matches_config(car, config):
     title = norm(car["title"])
+    # Si el modelo está vacío, vale cualquier modelo de esa marca.
     return all(
         norm(value) in title
         for value in (config.get("make", ""), config.get("model", ""))
@@ -219,14 +235,14 @@ def matches_config(car, config):
 def within_limits(car, config):
     max_price = number(config.get("max_price", ""))
     price = number(car["price"])
-    if max_price is not None and price is not None and price > max_price:
+    if max_price is not None and (price is None or price > max_price):
         return False
 
     max_km = number(config.get("max_km", ""))
     if max_km is not None:
         match = re.search(r"(?:\d{1,3}(?:[.\s]\d{3})+|\d+)\s*km", car["_listing_text"], re.I)
         km = int(re.sub(r"\D", "", match.group(0))) if match else None
-        if km is not None and km > max_km:
+        if km is None or km > max_km:
             return False
 
     return True
@@ -272,7 +288,7 @@ def fetch_autoscout(config, session, max_pages=MAX_PAGES):
         request_url = url_make_only if fallback_used else url_with_model
         response = get(session, request_url, params, "AutoScout24")
 
-        if response is None and request_url != url_with_model:
+        if response is None and request_url != url_make_only:
             print("[AutoScout24] Ruta con modelo no válida; probando solo con la marca.", flush=True)
             fallback_used = True
             response = get(session, url_make_only, params, "AutoScout24")
@@ -282,11 +298,14 @@ def fetch_autoscout(config, session, max_pages=MAX_PAGES):
 
         if blocked(response.text):
             log.error("AutoScout24 parece haber bloqueado la petición.")
+            print(f"[AutoScout24 DEBUG] Fragmento de la respuesta: {response.text[:400]!r}", flush=True)
             break
 
         listings = BeautifulSoup(response.text, "html.parser").select("article")
         if not listings:
             print(f"[AutoScout24] Sin anuncios en página {page}, fin.", flush=True)
+            print(f"[AutoScout24 DEBUG] Longitud HTML: {len(response.text)} caracteres.", flush=True)
+            print(f"[AutoScout24 DEBUG] Fragmento: {response.text[:400]!r}", flush=True)
             break
 
         for item in listings:
@@ -300,29 +319,111 @@ def fetch_autoscout(config, session, max_pages=MAX_PAGES):
             if qualifies(car, config):
                 cars.append(car)
 
-        time.sleep(1.5)
+        human_pause(2.0, 4.5)
 
     print(f"[AutoScout24] {len(cars)} anuncios válidos encontrados.", flush=True)
     return cars
 
 
 # ---------------------------------------------------------------------------
-# mobile.de (Playwright + URL Directa + Stealth)
+# mobile.de (requiere Playwright: el listado se renderiza con JS)
 # ---------------------------------------------------------------------------
 
+def click_first_visible(locator, timeout=6000):
+    try:
+        count = locator.count()
+    except Exception:
+        return False
+
+    for index in range(count):
+        candidate = locator.nth(index)
+        try:
+            if candidate.is_visible():
+                candidate.click(timeout=timeout)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def accept_mobile_cookies(page):
+    button_pattern = re.compile("Alle akzeptieren|Akzeptieren|Zustimmen|Accept all", re.IGNORECASE)
+
+    for frame in page.frames:
+        try:
+            locator = frame.get_by_text(button_pattern)
+            if locator.count() and click_first_visible(locator, timeout=4000):
+                print("[mobile.de] Banner de cookies cerrado (iframe).", flush=True)
+                return True
+        except Exception:
+            continue
+
+    try:
+        locator = page.get_by_text(button_pattern)
+        if locator.count() and click_first_visible(locator, timeout=4000):
+            print("[mobile.de] Banner de cookies cerrado (DOM principal).", flush=True)
+            return True
+    except Exception:
+        pass
+
+    print("[mobile.de] No se encontró banner de cookies (o ya estaba cerrado).", flush=True)
+    return False
+
+
+def mobile_select_value(page, field_pattern, field_label, value):
+    print(f"[mobile.de] Seleccionando {field_label} = {value}...", flush=True)
+
+    field_locator = page.get_by_text(re.compile(field_pattern, re.IGNORECASE), exact=False)
+    if not click_first_visible(field_locator):
+        raise RuntimeError(f"No se encontró el selector de {field_label}.")
+
+    page.wait_for_timeout(400)
+    inputs = page.locator("input:visible")
+    if not inputs.count():
+        raise RuntimeError(f"No se abrió el campo de {field_label}.")
+
+    target_input = inputs.nth(inputs.count() - 1)
+    target_input.fill(value)
+
+    try:
+        page.wait_for_selector(f"text=/^{re.escape(value)}/i", timeout=4000)
+    except Exception:
+        pass
+
+    option = page.get_by_text(re.compile(rf"^{re.escape(value)}", re.IGNORECASE))
+    if not click_first_visible(option):
+        raise RuntimeError(f"mobile.de no ofreció una opción para {field_label}: {value}")
+
+    print(f"[mobile.de] {field_label} seleccionado.", flush=True)
+
+
 def fetch_mobile_de(config, _session=None, max_pages=MAX_PAGES):
-    make = config.get("make", "").strip().lower()
-    model = config.get("model", "").strip().lower()
+    make = config.get("make", "").strip()
+    model = config.get("model", "").strip()
+
     if not make:
         log.error("mobile.de requiere make.")
         return []
 
     try:
         from playwright.sync_api import sync_playwright
-        from playwright_stealth import stealth_sync
     except ImportError:
-        log.error("Falta instalar dependencias de Playwright/Stealth.")
+        log.error("Playwright no está instalado (pip install playwright + playwright install chromium).")
         return []
+
+    # playwright-stealth es opcional: si no está instalado EN EL SERVIDOR
+    # donde corre este script (no basta con instalarlo en tu PC local), se
+    # avisa y se continúa sin él en vez de romper todo el pipeline.
+    try:
+        from playwright_stealth import stealth_sync
+        stealth_available = True
+    except ImportError:
+        stealth_available = False
+        log.warning(
+            "playwright-stealth no está instalado en este entorno; "
+            "continuando sin evasión anti-bot adicional. "
+            "Instálalo con: pip install playwright-stealth"
+        )
 
     cars = []
 
@@ -332,50 +433,33 @@ def fetch_mobile_de(config, _session=None, max_pages=MAX_PAGES):
 
         try:
             print("[mobile.de] Arrancando Chromium...", flush=True)
-            browser = playwright.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-blink-features=AutomationControlled",
-                ]
-            )
-            context = browser.new_context(
-                locale="de-DE",
-                user_agent=HEADERS["User-Agent"],
-                viewport={"width": 1920, "height": 1080}
-            )
+            browser = playwright.chromium.launch(headless=True)
+            context = browser.new_context(locale="de-DE", user_agent=HEADERS["User-Agent"])
             page = context.new_page()
-            stealth_sync(page)
 
-            # Construir URL directa con parámetros
-            base_search_url = "https://suchen.mobile.de/fahrzeuge/search.html?isSearchRequest=true&s=Car&vc=Car"
-            query_params = {
-                "cn": "DE",
-                "mk": make,
-                "mo": model if model else None,
-                "prx": config.get("max_price") or None,
-                "mlx": config.get("max_km") or None,
-                "zip": config.get("zip_code") or None,
-                "rd": config.get("radius") or None,
-                "s": "Order_By_Creation_Date_Desc",
-            }
-            query_params = {k: v for k, v in query_params.items() if v is not None}
-            search_url = f"{base_search_url}&{urlencode(query_params)}"
+            if stealth_available:
+                stealth_sync(page)
+                print("[mobile.de] Modo stealth activado.", flush=True)
 
-            print("[mobile.de] Cargando búsqueda directa...", flush=True)
-            page.goto(search_url, wait_until="domcontentloaded", timeout=35000)
-            page.wait_for_timeout(2000)
+            def block_heavy(route):
+                if route.request.resource_type in ("image", "stylesheet", "font", "media"):
+                    route.abort()
+                else:
+                    route.continue_()
 
-            # Aceptar cookies si aparecen
-            try:
-                cookie_btn = page.locator("button:has-text('Alle akzeptieren'), button:has-text('Akzeptieren')").first
-                if cookie_btn.is_visible(timeout=3000):
-                    cookie_btn.click()
-                    print("[mobile.de] Banner de cookies aceptado.", flush=True)
-            except Exception:
-                pass
+            page.route("**/*", block_heavy)
+
+            print("[mobile.de] Cargando página de búsqueda...", flush=True)
+            page.goto("https://www.mobile.de/fahrzeuge/search.html", wait_until="domcontentloaded", timeout=30000)
+
+            accept_mobile_cookies(page)
+            human_pause(0.8, 1.8)
+            mobile_select_value(page, "Marke", "marca", make)
+            human_pause(0.6, 1.4)
+            if model:
+                mobile_select_value(page, "Modell", "modelo", model)
+
+            page.wait_for_timeout(random.randint(1200, 2200))
 
             for page_number in range(1, max_pages + 1):
                 print(f"[mobile.de] Leyendo página {page_number}/{max_pages}...", flush=True)
@@ -386,7 +470,7 @@ def fetch_mobile_de(config, _session=None, max_pages=MAX_PAGES):
                     break
 
                 soup = BeautifulSoup(content, "html.parser")
-                listings = soup.select('[data-testid="result-listing"], div.cBox-body--resultitem, article')
+                listings = soup.select('[data-testid="result-listing"], div.cBox-body--resultitem')
 
                 if not listings:
                     print(f"[mobile.de] Sin tarjetas de resultado en página {page_number}.", flush=True)
@@ -406,13 +490,12 @@ def fetch_mobile_de(config, _session=None, max_pages=MAX_PAGES):
                 if page_number == max_pages:
                     break
 
-                next_button = page.locator('[data-testid="pagination-next-button"], a[rel="next"]').first
-                if next_button.is_visible():
-                    next_button.click()
-                    page.wait_for_load_state("domcontentloaded")
-                    page.wait_for_timeout(2000)
-                else:
+                next_button = page.locator('[data-testid="pagination-next-button"], a[rel="next"]')
+                if not click_first_visible(next_button):
                     break
+
+                page.wait_for_load_state("domcontentloaded")
+                page.wait_for_timeout(random.randint(1000, 2000))
 
         except Exception as error:
             log.error("No se pudo automatizar mobile.de: %s", error)
@@ -431,13 +514,17 @@ def fetch_mobile_de(config, _session=None, max_pages=MAX_PAGES):
 # Kleinanzeigen
 # ---------------------------------------------------------------------------
 
-def fetch_kleinanzeigen(config, session, max_pages=MAX_PAGES):
+def fetch_kleinanzeigen(config, session, max_pages=KLEINANZEIGEN_MAX_PAGES):
     query = " ".join(filter(None, (config.get("make", "").strip(), config.get("model", "").strip())))
     if not query:
         return []
 
     slug = quote(re.sub(r"\s+", "-", query.strip().lower()), safe="-")
     cars = []
+
+    # Pausa inicial antes de la primera petición: simula que alguien acaba
+    # de escribir la búsqueda, en vez de golpear la web al instante.
+    human_pause(1.5, 3.5)
 
     for page in range(1, max_pages + 1):
         print(f"[Kleinanzeigen] Página {page}/{max_pages}...", flush=True)
@@ -457,12 +544,19 @@ def fetch_kleinanzeigen(config, session, max_pages=MAX_PAGES):
             break
 
         if blocked(response.text):
-            log.error("Kleinanzeigen parece haber bloqueado la petición.")
+            log.error(
+                "Kleinanzeigen ha bloqueado la petición (probable protección "
+                "anti-bot tipo captcha). Se detiene esta plataforma en este "
+                "ciclo; lo normal es que en el siguiente ciclo vuelva a "
+                "funcionar sin hacer nada."
+            )
             break
 
         listings = BeautifulSoup(response.text, "html.parser").select("article.aditem, li.ad-listitem article")
         if not listings:
             print(f"[Kleinanzeigen] Sin anuncios en página {page}, fin.", flush=True)
+            print(f"[Kleinanzeigen DEBUG] Longitud HTML: {len(response.text)} caracteres.", flush=True)
+            print(f"[Kleinanzeigen DEBUG] Fragmento: {response.text[:400]!r}", flush=True)
             break
 
         for item in listings:
@@ -476,7 +570,9 @@ def fetch_kleinanzeigen(config, session, max_pages=MAX_PAGES):
             if qualifies(car, config):
                 cars.append(car)
 
-        time.sleep(1.5)
+        # Kleinanzeigen es la plataforma más sensible a bloqueos: pausa
+        # notablemente más larga y aleatoria entre páginas que las otras dos.
+        human_pause(4.0, 8.0)
 
     print(f"[Kleinanzeigen] {len(cars)} anuncios válidos encontrados.", flush=True)
     return cars
@@ -573,7 +669,3 @@ def run_pipeline():
 
     save_seen(seen)
     print(f"Ciclo finalizado. Avisos enviados: {sent}", flush=True)
-
-
-if __name__ == "__main__":
-    run_pipeline()
