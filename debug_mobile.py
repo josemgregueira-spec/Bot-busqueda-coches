@@ -9,7 +9,7 @@ Uso (en el servidor, dentro de la carpeta del proyecto):
 from playwright.sync_api import sync_playwright
 
 try:
-    from playwright_stealth import stealth_sync
+    from playwright_stealth import Stealth
     STEALTH_AVAILABLE = True
 except ImportError:
     STEALTH_AVAILABLE = False
@@ -24,7 +24,7 @@ def main():
         page = context.new_page()
 
         if STEALTH_AVAILABLE:
-            stealth_sync(page)
+            Stealth().apply_stealth_sync(page)
             print("Modo stealth ACTIVADO para esta prueba.\n")
         else:
             print("playwright-stealth no disponible; prueba SIN stealth.\n")
