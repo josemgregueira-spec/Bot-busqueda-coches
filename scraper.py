@@ -256,6 +256,28 @@ def qualifies(car, config):
 # AutoScout24
 # ---------------------------------------------------------------------------
 
+# AutoScout24 usa "slugs" concretos en la URL que no siempre coinciden con el
+# nombre corto/habitual de la marca (p. ej. "mercedes" da 404; hace falta
+# "mercedes-benz"). Se van añadiendo alias aquí según se detecten casos.
+AUTOSCOUT_MAKE_ALIASES = {
+    "mercedes": "mercedes-benz",
+    "mercedesbenz": "mercedes-benz",
+    "vw": "volkswagen",
+    "landrover": "land-rover",
+    "land rover": "land-rover",
+    "alfa": "alfa-romeo",
+    "alfaromeo": "alfa-romeo",
+    "alfa romeo": "alfa-romeo",
+}
+
+
+def autoscout_slug(value):
+    key = value.strip().lower()
+    key_no_spaces = key.replace(" ", "")
+    alias = AUTOSCOUT_MAKE_ALIASES.get(key) or AUTOSCOUT_MAKE_ALIASES.get(key_no_spaces)
+    return alias if alias else quote(key, safe="-")
+
+
 def fetch_autoscout(config, session, max_pages=MAX_PAGES):
     make = config.get("make", "").strip().lower()
     model = config.get("model", "").strip().lower()
@@ -263,7 +285,7 @@ def fetch_autoscout(config, session, max_pages=MAX_PAGES):
         log.error("AutoScout24 requiere make.")
         return []
 
-    url_make_only = f"https://www.autoscout24.de/lst/{quote(make, safe='-')}"
+    url_make_only = f"https://www.autoscout24.de/lst/{autoscout_slug(make)}"
     url_with_model = f"{url_make_only}/{quote(model, safe='-')}" if model else url_make_only
     fallback_used = False
 
@@ -514,65 +536,106 @@ def fetch_mobile_de(config, _session=None, max_pages=MAX_PAGES):
 # Kleinanzeigen
 # ---------------------------------------------------------------------------
 
-def fetch_kleinanzeigen(config, session, max_pages=KLEINANZEIGEN_MAX_PAGES):
+def fetch_kleinanzeigen(config, _session=None, max_pages=KLEINANZEIGEN_MAX_PAGES):
+    """
+    Kleinanzeigen rediseñó su web con Astro (renderizado del lado del
+    cliente): los anuncios NO están en el HTML inicial, se cargan con
+    JavaScript después. Por eso ya no se puede usar requests/BeautifulSoup
+    aquí, igual que con mobile.de: hace falta un navegador real (Playwright).
+
+    En vez de adivinar selectores de clases CSS (que cambian con cada
+    rediseño), nos apoyamos en algo mucho más estable: todos los enlaces a
+    un anuncio individual de Kleinanzeigen contienen "/s-anzeige/" en su URL,
+    y eso lleva años sin cambiar pese a los rediseños del resto de la web.
+    """
     query = " ".join(filter(None, (config.get("make", "").strip(), config.get("model", "").strip())))
     if not query:
+        return []
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        log.error("Playwright no está instalado (pip install playwright + playwright install chromium).")
         return []
 
     slug = quote(re.sub(r"\s+", "-", query.strip().lower()), safe="-")
     cars = []
 
-    # Pausa inicial antes de la primera petición: simula que alguien acaba
-    # de escribir la búsqueda, en vez de golpear la web al instante.
-    human_pause(1.5, 3.5)
+    with sync_playwright() as playwright:
+        browser = None
+        try:
+            print("[Kleinanzeigen] Arrancando Chromium...", flush=True)
+            browser = playwright.chromium.launch(headless=True)
+            context = browser.new_context(locale="de-DE", user_agent=HEADERS["User-Agent"])
+            page = context.new_page()
 
-    for page in range(1, max_pages + 1):
-        print(f"[Kleinanzeigen] Página {page}/{max_pages}...", flush=True)
-        prefix = f"seite:{page}/" if page > 1 else ""
-        url = f"https://www.kleinanzeigen.de/s-autos/{prefix}{slug}/k0c216"
+            url = f"https://www.kleinanzeigen.de/s-autos/{slug}/k0c216"
+            print(f"[Kleinanzeigen] Cargando {url}...", flush=True)
+            page.goto(url, wait_until="networkidle", timeout=30000)
+            human_pause(2.0, 4.0)
 
-        params = {
-            "maxPrice": config.get("max_price") or None,
-            "locationStr": config.get("zip_code") or None,
-            "radius": config.get("radius") or None,
-            "sortingField": "SORTING_DATE",
-        }
-        params = {k: v for k, v in params.items() if v is not None}
+            if blocked(page.content()):
+                log.error(
+                    "Kleinanzeigen ha bloqueado la petición (probable protección "
+                    "anti-bot). Se detiene esta plataforma en este ciclo."
+                )
+                return []
 
-        response = get(session, url, params, "Kleinanzeigen")
-        if not response:
-            break
-
-        if blocked(response.text):
-            log.error(
-                "Kleinanzeigen ha bloqueado la petición (probable protección "
-                "anti-bot tipo captcha). Se detiene esta plataforma en este "
-                "ciclo; lo normal es que en el siguiente ciclo vuelva a "
-                "funcionar sin hacer nada."
+            # Se extraen los datos directamente en el navegador (más fiable
+            # que descargar el HTML y volver a parsearlo aparte), subiendo
+            # desde cada enlace "/s-anzeige/" hasta su contenedor (article/
+            # li/div) para sacar el texto e imagen de ese anuncio concreto.
+            raw_items = page.eval_on_selector_all(
+                'a[href*="/s-anzeige/"]',
+                """
+                els => els.map(a => {
+                    const container = a.closest('article, li, div') || a;
+                    const img = container.querySelector('img');
+                    return {
+                        href: a.href,
+                        text: container.innerText || a.innerText || '',
+                        img: img ? (img.src || img.getAttribute('data-src')) : null
+                    };
+                })
+                """,
             )
-            break
+            print(f"[Kleinanzeigen] {len(raw_items)} enlaces de anuncio detectados.", flush=True)
 
-        listings = BeautifulSoup(response.text, "html.parser").select("article.aditem, li.ad-listitem article")
-        if not listings:
-            print(f"[Kleinanzeigen] Sin anuncios en página {page}, fin.", flush=True)
-            print(f"[Kleinanzeigen DEBUG] Longitud HTML: {len(response.text)} caracteres.", flush=True)
-            print(f"[Kleinanzeigen DEBUG] Fragmento: {response.text[:400]!r}", flush=True)
-            break
+            seen_links = set()
+            for raw in raw_items:
+                link = clean_link(raw["href"])
+                if link in seen_links or not link.startswith(("http://", "https://")):
+                    continue
+                seen_links.add(link)
 
-        for item in listings:
-            car = make_car(
-                "Kleinanzeigen",
-                "https://www.kleinanzeigen.de",
-                item,
-                ".text-module-begin, h2",
-                ".aditem-main--middle--price-shipping--price, [class*='price']",
-            )
-            if qualifies(car, config):
-                cars.append(car)
+                listing_text = raw["text"] or ""
+                if has_deductible_vat(listing_text):
+                    continue
 
-        # Kleinanzeigen es la plataforma más sensible a bloqueos: pausa
-        # notablemente más larga y aleatoria entre páginas que las otras dos.
-        human_pause(4.0, 8.0)
+                lines = [line.strip() for line in listing_text.split("\n") if line.strip()]
+                title = lines[0] if lines else "Vehículo"
+                price = next((line for line in lines if "€" in line), "Consultar")
+
+                car = {
+                    "id": f"kleinanzeigen:{link}",
+                    "title": title,
+                    "price": price,
+                    "link": link,
+                    "image": raw["img"],
+                    "platform": "Kleinanzeigen",
+                    "_listing_text": listing_text,
+                    "seller_type": "Sin IVA deducible detectado",
+                }
+
+                if qualifies(car, config):
+                    cars.append(car)
+
+        except Exception as error:
+            log.error("No se pudo automatizar Kleinanzeigen: %s", error)
+
+        finally:
+            if browser:
+                browser.close()
 
     print(f"[Kleinanzeigen] {len(cars)} anuncios válidos encontrados.", flush=True)
     return cars
@@ -644,7 +707,7 @@ def run_pipeline():
     for name, fetcher, needs_session in (
         ("AutoScout24", fetch_autoscout, True),
         ("mobile.de", fetch_mobile_de, False),
-        ("Kleinanzeigen", fetch_kleinanzeigen, True),
+        ("Kleinanzeigen", fetch_kleinanzeigen, False),
     ):
         try:
             cars = fetcher(config, session) if needs_session else fetcher(config)
