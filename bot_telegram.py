@@ -69,6 +69,25 @@ def menu(config):
     )
 
 
+# --- DEBUG TEMPORAL ---------------------------------------------------
+# Registra en la consola CUALQUIER mensaje que le llegue al bot, venga de
+# donde venga, con su chat_id/tipo real y si allowed() lo dejaría pasar.
+# Sirve para confirmar si el problema es que el mensaje no llega en
+# absoluto, o si llega pero se descarta por algo. Quitar una vez resuelto.
+async def debug_all_updates(update: Update, _context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    msg = update.effective_message
+    print(
+        f"[DEBUG UPDATE] chat_id={chat.id if chat else None} "
+        f"chat_type={chat.type if chat else None} "
+        f"texto={msg.text if msg else None!r} "
+        f"allowed={allowed(update)} "
+        f"CHAT_ID_configurado={CHAT_ID!r}",
+        flush=True,
+    )
+# ------------------------------------------------------------------------
+
+
 async def start(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
         return
@@ -207,6 +226,11 @@ def main():
     Thread(target=health_server, daemon=True).start()
 
     app = Application.builder().token(TOKEN).build()
+
+    # DEBUG TEMPORAL: se registra en group=-1 para que se ejecute ANTES que
+    # el resto de handlers, sin bloquearlos ni interferir con ellos.
+    app.add_handler(MessageHandler(filters.ALL, debug_all_updates), group=-1)
+
     app.add_handler(CommandHandler(["start", "config", "menu"], start))
     app.add_handler(CallbackQueryHandler(callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text))
