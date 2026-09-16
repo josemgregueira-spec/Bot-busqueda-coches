@@ -638,7 +638,31 @@ def fetch_kleinanzeigen(config, _session=None, max_pages=KLEINANZEIGEN_MAX_PAGES
                 'a[href*="/s-anzeige/"]',
                 """
                 els => els.map(a => {
-                    const container = a.closest('article, li, div') || a;
+                    // Se prefieren contenedores "de verdad" de la tarjeta del
+                    // anuncio. OJO: closest('article, li, div') es un error
+                    // habitual, porque 'div' es tan genérico que casi siempre
+                    // encuentra un <div> diminuto (el que envuelve solo la
+                    // imagen o el enlace) ANTES de llegar al contenedor real
+                    // que tiene el precio y el título -> por eso salía
+                    // siempre "Consultar" como precio.
+                    let container = a.closest('article, li[data-adid], li');
+
+                    if (!container) {
+                        // Último recurso: subir manualmente hasta encontrar
+                        // un antepasado cuyo texto SÍ contenga un símbolo de
+                        // moneda (señal de que ya llegamos a la tarjeta
+                        // completa, no solo a un trozo suyo).
+                        let node = a;
+                        for (let i = 0; i < 6 && node.parentElement; i++) {
+                            node = node.parentElement;
+                            if (node.innerText && node.innerText.includes('€')) {
+                                container = node;
+                                break;
+                            }
+                        }
+                        if (!container) container = a.parentElement || a;
+                    }
+
                     const img = container.querySelector('img');
                     return {
                         href: a.href,
@@ -650,7 +674,17 @@ def fetch_kleinanzeigen(config, _session=None, max_pages=KLEINANZEIGEN_MAX_PAGES
             )
             print(f"[Kleinanzeigen] {len(raw_items)} enlaces de anuncio detectados.", flush=True)
 
+            # DEBUG TEMPORAL: muestra el texto crudo de los primeros 3
+            # anuncios para poder ver exactamente qué estamos capturando,
+            # sin tener que adivinar más a ciegas.
+            for i, raw in enumerate(raw_items[:3]):
+                preview = (raw["text"] or "")[:200].replace("\n", " | ")
+                print(f"[Kleinanzeigen DEBUG] Item {i}: {preview!r}", flush=True)
+
             seen_links = set()
+            rejected_no_price = 0
+            rejected_no_match = 0
+
             for raw in raw_items:
                 link = clean_link(raw["href"])
                 if link in seen_links or not link.startswith(("http://", "https://")):
@@ -678,6 +712,18 @@ def fetch_kleinanzeigen(config, _session=None, max_pages=KLEINANZEIGEN_MAX_PAGES
 
                 if qualifies(car, config):
                     cars.append(car)
+                elif not within_limits(car, config):
+                    rejected_no_price += 1
+                elif not matches_config(car, config):
+                    rejected_no_match += 1
+
+            if rejected_no_price or rejected_no_match:
+                print(
+                    f"[Kleinanzeigen DEBUG] Descartados por precio/km no válido: "
+                    f"{rejected_no_price}. Descartados por no coincidir marca/modelo: "
+                    f"{rejected_no_match}.",
+                    flush=True,
+                )
 
         except Exception as error:
             log.error("No se pudo automatizar Kleinanzeigen: %s", error)
