@@ -116,30 +116,33 @@ def number(value):
     return int(re.sub(r"\D", "", match.group(0))) if match else None
 
 
-def blocked(content):
+def blocked_title(title):
     """
-    Devuelve la palabra/frase concreta que hizo saltar la alarma de bloqueo,
-    o None si no hay ninguna. Antes solo devolvía True/False, lo que no
-    permitía saber SI de verdad era un bloqueo real o un falso positivo por
-    una palabra demasiado genérica (p. ej. "roboter" puede aparecer en texto
-    legal normal, sin que la página esté bloqueada de verdad).
+    Comprueba solo el <title> de la página (no todo el HTML) contra frases
+    típicas de páginas de bloqueo/challenge. Mirar el título es mucho más
+    fiable que buscar palabras sueltas en todo el documento: una página de
+    resultados normal puede incluir de fondo el script de un captcha "por si
+    acaso" (práctica habitual en muchas webs) sin que eso signifique que la
+    petición fue bloqueada; en cambio, una página de bloqueo real SÍ pone
+    algo como "Access denied" directamente en el título.
     """
-    content_lower = content.lower()
-    # Solo frases específicas de páginas de bloqueo/captcha real, no
-    # palabras sueltas genéricas que puedan aparecer en cualquier web.
+    if not title:
+        return None
+
+    title_lower = title.lower()
     markers = (
-        "captcha",
         "access denied",
+        "zugriff verweigert",
+        "attention required",
+        "just a moment",
+        "you have been blocked",
+        "pardon our interruption",
+        "too many requests",
         "verify you are human",
         "unusual traffic",
-        "bestätigen sie, dass sie ein mensch sind",
-        "zugriff verweigert",
-        "ungewöhnlicher datenverkehr",
-        "bot-erkennung",
-        "pardon our interruption",
     )
     for marker in markers:
-        if marker in content_lower:
+        if marker in title_lower:
             return marker
     return None
 
@@ -328,13 +331,18 @@ def fetch_autoscout(config, session, max_pages=MAX_PAGES):
         if not response:
             break
 
-        block_reason = blocked(response.text)
+        soup = BeautifulSoup(response.text, "html.parser")
+        page_title = soup.title.string.strip() if soup.title and soup.title.string else ""
+
+        block_reason = blocked_title(page_title)
         if block_reason:
-            log.error("AutoScout24 parece haber bloqueado la petición (marcador: %r).", block_reason)
-            print(f"[AutoScout24 DEBUG] Fragmento de la respuesta: {response.text[:400]!r}", flush=True)
+            log.error(
+                "AutoScout24 parece haber bloqueado la petición (título: %r, marcador: %r).",
+                page_title, block_reason,
+            )
             break
 
-        listings = BeautifulSoup(response.text, "html.parser").select("article")
+        listings = soup.select("article")
         if not listings:
             print(f"[AutoScout24] Sin anuncios en página {page}, fin.", flush=True)
             print(f"[AutoScout24 DEBUG] Longitud HTML: {len(response.text)} caracteres.", flush=True)
@@ -498,9 +506,12 @@ def fetch_mobile_de(config, _session=None, max_pages=MAX_PAGES):
                 print(f"[mobile.de] Leyendo página {page_number}/{max_pages}...", flush=True)
                 content = page.content()
 
-                block_reason = blocked(content)
+                block_reason = blocked_title(page.title())
                 if block_reason:
-                    log.error("mobile.de parece haber bloqueado el navegador (marcador: %r).", block_reason)
+                    log.error(
+                        "mobile.de parece haber bloqueado el navegador (título: %r, marcador: %r).",
+                        page.title(), block_reason,
+                    )
                     break
 
                 soup = BeautifulSoup(content, "html.parser")
@@ -600,12 +611,12 @@ def fetch_kleinanzeigen(config, _session=None, max_pages=KLEINANZEIGEN_MAX_PAGES
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
             human_pause(2.0, 4.0)
 
-            block_reason = blocked(page.content())
+            block_reason = blocked_title(page.title())
             if block_reason:
                 log.error(
-                    "Kleinanzeigen ha bloqueado la petición (marcador: %r). "
+                    "Kleinanzeigen ha bloqueado la petición (título: %r, marcador: %r). "
                     "Se detiene esta plataforma en este ciclo.",
-                    block_reason,
+                    page.title(), block_reason,
                 )
                 return []
 
