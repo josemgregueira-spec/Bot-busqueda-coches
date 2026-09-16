@@ -559,6 +559,24 @@ def fetch_mobile_de(config, _session=None, max_pages=MAX_PAGES):
 # Kleinanzeigen
 # ---------------------------------------------------------------------------
 
+def pick_title(lines):
+    """
+    Elige una línea razonable como título entre las primeras del bloque de
+    texto de la tarjeta. La primera línea de Kleinanzeigen suele ser solo
+    una etiqueta corta (fecha, "TOP", código postal), no el título real del
+    anuncio -- así que se descartan esas y se coge la primera línea "larga"
+    que no sea un código postal + ciudad.
+    """
+    for line in lines[:6]:
+        if re.match(r"^\d{5}\s", line):  # código postal + ciudad
+            continue
+        if line.strip().upper() in ("TOP", "ANZEIGE", "GESPONSERT"):
+            continue
+        if len(line) >= 12:
+            return line
+    return lines[0] if lines else "Vehículo"
+
+
 def fetch_kleinanzeigen(config, _session=None, max_pages=KLEINANZEIGEN_MAX_PAGES):
     """
     Kleinanzeigen rediseñó su web con Astro (renderizado del lado del
@@ -684,6 +702,7 @@ def fetch_kleinanzeigen(config, _session=None, max_pages=KLEINANZEIGEN_MAX_PAGES
             seen_links = set()
             rejected_no_price = 0
             rejected_no_match = 0
+            debug_shown = 0
 
             for raw in raw_items:
                 link = clean_link(raw["href"])
@@ -696,7 +715,7 @@ def fetch_kleinanzeigen(config, _session=None, max_pages=KLEINANZEIGEN_MAX_PAGES
                     continue
 
                 lines = [line.strip() for line in listing_text.split("\n") if line.strip()]
-                title = lines[0] if lines else "Vehículo"
+                title = pick_title(lines)
                 price = next((line for line in lines if "€" in line), "Consultar")
 
                 car = {
@@ -710,11 +729,23 @@ def fetch_kleinanzeigen(config, _session=None, max_pages=KLEINANZEIGEN_MAX_PAGES
                     "seller_type": "Sin IVA deducible detectado",
                 }
 
-                if qualifies(car, config):
+                match_ok = matches_config(car, config)
+                limits_ok = within_limits(car, config)
+
+                if debug_shown < 3:
+                    print(
+                        f"[Kleinanzeigen DEBUG] título={title!r} precio={price!r} "
+                        f"num_precio={number(price)!r} coincide_marca={match_ok} "
+                        f"dentro_de_limites={limits_ok}",
+                        flush=True,
+                    )
+                    debug_shown += 1
+
+                if match_ok and limits_ok:
                     cars.append(car)
-                elif not within_limits(car, config):
+                elif not limits_ok:
                     rejected_no_price += 1
-                elif not matches_config(car, config):
+                elif not match_ok:
                     rejected_no_match += 1
 
             if rejected_no_price or rejected_no_match:
@@ -799,6 +830,12 @@ def run_pipeline(platforms=None):
     """
     config = load_config()
     seen = load_seen()
+
+    print(
+        f"[Config actual] marca={config.get('make')!r} modelo={config.get('model')!r} "
+        f"max_price={config.get('max_price')!r} max_km={config.get('max_km')!r}",
+        flush=True,
+    )
 
     session = requests.Session()
     session.headers.update(HEADERS)
