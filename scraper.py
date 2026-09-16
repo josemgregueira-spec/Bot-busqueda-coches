@@ -117,7 +117,16 @@ def number(value):
 
 
 def blocked(content):
-    content = content.lower()
+    """
+    Devuelve la palabra/frase concreta que hizo saltar la alarma de bloqueo,
+    o None si no hay ninguna. Antes solo devolvía True/False, lo que no
+    permitía saber SI de verdad era un bloqueo real o un falso positivo por
+    una palabra demasiado genérica (p. ej. "roboter" puede aparecer en texto
+    legal normal, sin que la página esté bloqueada de verdad).
+    """
+    content_lower = content.lower()
+    # Solo frases específicas de páginas de bloqueo/captcha real, no
+    # palabras sueltas genéricas que puedan aparecer en cualquier web.
     markers = (
         "captcha",
         "access denied",
@@ -126,12 +135,13 @@ def blocked(content):
         "bestätigen sie, dass sie ein mensch sind",
         "zugriff verweigert",
         "ungewöhnlicher datenverkehr",
-        "roboter",
         "bot-erkennung",
-        "please verify",
         "pardon our interruption",
     )
-    return any(marker in content for marker in markers)
+    for marker in markers:
+        if marker in content_lower:
+            return marker
+    return None
 
 
 def has_deductible_vat(text):
@@ -318,8 +328,9 @@ def fetch_autoscout(config, session, max_pages=MAX_PAGES):
         if not response:
             break
 
-        if blocked(response.text):
-            log.error("AutoScout24 parece haber bloqueado la petición.")
+        block_reason = blocked(response.text)
+        if block_reason:
+            log.error("AutoScout24 parece haber bloqueado la petición (marcador: %r).", block_reason)
             print(f"[AutoScout24 DEBUG] Fragmento de la respuesta: {response.text[:400]!r}", flush=True)
             break
 
@@ -487,8 +498,9 @@ def fetch_mobile_de(config, _session=None, max_pages=MAX_PAGES):
                 print(f"[mobile.de] Leyendo página {page_number}/{max_pages}...", flush=True)
                 content = page.content()
 
-                if blocked(content):
-                    log.error("mobile.de parece haber bloqueado el navegador.")
+                block_reason = blocked(content)
+                if block_reason:
+                    log.error("mobile.de parece haber bloqueado el navegador (marcador: %r).", block_reason)
                     break
 
                 soup = BeautifulSoup(content, "html.parser")
@@ -588,10 +600,12 @@ def fetch_kleinanzeigen(config, _session=None, max_pages=KLEINANZEIGEN_MAX_PAGES
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
             human_pause(2.0, 4.0)
 
-            if blocked(page.content()):
+            block_reason = blocked(page.content())
+            if block_reason:
                 log.error(
-                    "Kleinanzeigen ha bloqueado la petición (probable protección "
-                    "anti-bot). Se detiene esta plataforma en este ciclo."
+                    "Kleinanzeigen ha bloqueado la petición (marcador: %r). "
+                    "Se detiene esta plataforma en este ciclo.",
+                    block_reason,
                 )
                 return []
 
