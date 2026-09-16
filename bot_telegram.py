@@ -116,6 +116,25 @@ async def stream_subprocess_output(stream, tag):
     return "\n".join(lines)
 
 
+def platform_menu():
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🚘 AutoScout24", callback_data="search_autoscout")],
+            [InlineKeyboardButton("📦 Kleinanzeigen", callback_data="search_kleinanzeigen")],
+            [InlineKeyboardButton("⚠️ mobile.de (bloqueado por ahora)", callback_data="search_mobile")],
+            [InlineKeyboardButton("🔄 Las 3 a la vez", callback_data="search_all")],
+        ]
+    )
+
+
+PLATFORM_LABELS = {
+    "autoscout": "AutoScout24",
+    "kleinanzeigen": "Kleinanzeigen",
+    "mobile": "mobile.de",
+    "all": "las 3 plataformas",
+}
+
+
 async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
         return
@@ -124,59 +143,71 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     action = query.data
 
-    if action != "search":
-        context.user_data["field"] = action
-        labels = {
-            "make": "marca",
-            "model": "modelo",
-            "max_price": "precio máximo",
-            "max_km": "kilómetros máximos",
-        }
+    # --- Botón "Buscar ahora": primero se elige dónde buscar --------------
+    if action == "search":
+        await query.message.reply_text("¿Dónde quieres buscar?", reply_markup=platform_menu())
+        return
+
+    # --- Elección concreta de plataforma: se lanza la búsqueda ------------
+    if action.startswith("search_"):
+        platform_key = action.split("_", 1)[1]
+        label = PLATFORM_LABELS.get(platform_key, platform_key)
+
+        await query.message.reply_text(f"🔎 Buscando en {label}; puede tardar unos minutos…")
+
+        env = os.environ.copy()
+        env["RUN_ONCE"] = "1"  # Evita que main.py se quede en su bucle horario.
+        if platform_key != "all":
+            env["PLATFORMS"] = platform_key  # "all" no fija PLATFORMS -> rastrea las 3
+
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "main.py",
+            cwd=str(BASE_DIR),
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        stdout_task = asyncio.create_task(stream_subprocess_output(process.stdout, "main.py"))
+        stderr_task = asyncio.create_task(stream_subprocess_output(process.stderr, "main.py ERROR"))
+
+        try:
+            await asyncio.wait_for(process.wait(), timeout=210)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            # Se espera a que las tareas de lectura vacíen lo que ya se había
+            # impreso antes de matar el proceso, para no perder esas últimas
+            # líneas (que son justo las más útiles para saber dónde se atascó).
+            await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+            await query.message.reply_text(
+                "⏱️ Tiempo agotado tras 210s. Revisa la terminal del servidor: ahí verás en qué paso "
+                "exacto se quedó parado el rastreo."
+            )
+            return
+
+        stdout_text = await stdout_task
+        stderr_text = await stderr_task
+
+        output = (stderr_text if process.returncode else stdout_text).strip()
+        status = "✅ Búsqueda terminada" if process.returncode == 0 else "❌ Error al buscar"
         await query.message.reply_text(
-            f"Escribe el nuevo valor para {labels[action]}. Escribe 'ninguno' para vaciarlo."
+            f"{status}\n<pre>{html.escape(output[-300:]) or 'Sin salida.'}</pre>",
+            parse_mode="HTML",
         )
         return
 
-    await query.message.reply_text("🔎 Buscando; puede tardar hasta tres minutos…")
-
-    env = os.environ.copy()
-    env["RUN_ONCE"] = "1"  # Evita que main.py se quede en su bucle horario.
-
-    process = await asyncio.create_subprocess_exec(
-        sys.executable,
-        "main.py",
-        cwd=str(BASE_DIR),
-        env=env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-
-    stdout_task = asyncio.create_task(stream_subprocess_output(process.stdout, "main.py"))
-    stderr_task = asyncio.create_task(stream_subprocess_output(process.stderr, "main.py ERROR"))
-
-    try:
-        await asyncio.wait_for(process.wait(), timeout=210)
-    except asyncio.TimeoutError:
-        process.kill()
-        await process.wait()
-        # Se espera a que las tareas de lectura vacíen lo que ya se había
-        # impreso antes de matar el proceso, para no perder esas últimas
-        # líneas (que son justo las más útiles para saber dónde se atascó).
-        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
-        await query.message.reply_text(
-            "⏱️ Tiempo agotado tras 210s. Revisa el Live Tail de Render: ahí verás en qué paso "
-            "exacto se quedó parado el rastreo (por ejemplo, en qué página o plataforma)."
-        )
-        return
-
-    stdout_text = await stdout_task
-    stderr_text = await stderr_task
-
-    output = (stderr_text if process.returncode else stdout_text).strip()
-    status = "✅ Búsqueda terminada" if process.returncode == 0 else "❌ Error al buscar"
+    # --- Resto de botones (marca, modelo, precio, km): piden el nuevo valor
+    context.user_data["field"] = action
+    labels = {
+        "make": "marca",
+        "model": "modelo",
+        "max_price": "precio máximo",
+        "max_km": "kilómetros máximos",
+    }
     await query.message.reply_text(
-        f"{status}\n<pre>{html.escape(output[-300:]) or 'Sin salida.'}</pre>",
-        parse_mode="HTML",
+        f"Escribe el nuevo valor para {labels[action]}. Escribe 'ninguno' para vaciarlo."
     )
 
 
