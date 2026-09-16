@@ -720,19 +720,32 @@ def send_telegram(car):
 # Pipeline principal
 # ---------------------------------------------------------------------------
 
-def run_pipeline():
+def run_pipeline(platforms=None):
+    """
+    platforms: lista opcional de claves a rastrear ("autoscout", "mobile",
+    "kleinanzeigen"). Si es None, se rastrean las 3. Permite lanzar una
+    plataforma sola desde el botón del bot, en vez de golpear las 3 a la vez.
+    """
     config = load_config()
     seen = load_seen()
 
     session = requests.Session()
     session.headers.update(HEADERS)
 
+    fetchers = {
+        "autoscout": ("AutoScout24", fetch_autoscout, True),
+        "mobile": ("mobile.de", fetch_mobile_de, False),
+        "kleinanzeigen": ("Kleinanzeigen", fetch_kleinanzeigen, False),
+    }
+    selected = platforms if platforms else list(fetchers.keys())
+
     all_cars = []
-    for name, fetcher, needs_session in (
-        ("AutoScout24", fetch_autoscout, True),
-        ("mobile.de", fetch_mobile_de, False),
-        ("Kleinanzeigen", fetch_kleinanzeigen, False),
-    ):
+    for key in selected:
+        if key not in fetchers:
+            log.warning("Plataforma desconocida ignorada: %s", key)
+            continue
+
+        name, fetcher, needs_session = fetchers[key]
         try:
             cars = fetcher(config, session) if needs_session else fetcher(config)
             log.info("%s: %d anuncios encontrados.", name, len(cars))
