@@ -67,6 +67,7 @@ def load_config():
             "make": "bmw",
             "model": "",
             "vigilancia": False,
+            "min_price": "",
             "max_price": "20000",
             "max_km": "150000",
             "zip_code": "",
@@ -246,9 +247,14 @@ def matches_config(car, config):
 
 
 def within_limits(car, config):
-    max_price = number(config.get("max_price", ""))
     price = number(car["price"])
+
+    max_price = number(config.get("max_price", ""))
     if max_price is not None and (price is None or price > max_price):
+        return False
+
+    min_price = number(config.get("min_price", ""))
+    if min_price is not None and (price is None or price < min_price):
         return False
 
     max_km = number(config.get("max_km", ""))
@@ -326,6 +332,7 @@ def fetch_autoscout(config, session, max_pages=MAX_PAGES):
             "atype": "C",
             "page": page,
             "priceto": config.get("max_price") or None,
+            "pricefrom": config.get("min_price") or None,
             "kmto": config.get("max_km") or None,
             "zip": config.get("zip_code") or None,
             "zipr": config.get("radius") or None,
@@ -653,14 +660,17 @@ def fetch_kleinanzeigen(config, _session=None, max_pages=KLEINANZEIGEN_MAX_PAGES
 
             # Kleinanzeigen permite acotar por precio directamente en la
             # URL con el segmento "preis:MIN:MAX" (formato heredado de
-            # eBay Kleinanzeigen; no verificado en vivo tras el rediseño
-            # con Astro, pero suele mantenerse por compatibilidad SEO).
-            # Además se intenta ordenar por precio ascendente. IMPORTANTE:
-            # abre tú mismo esta URL exacta en un navegador normal para
-            # confirmar visualmente que el precio máximo y el orden se
-            # aplican de verdad -- la URL completa se imprime abajo.
+            # eBay Kleinanzeigen; ya confirmado que funciona tras probarlo
+            # a mano en el navegador). Con un mínimo puesto, se evita que
+            # las primeras páginas se llenen de piezas sueltas (llantas,
+            # faros, etc.) que suelen costar muy poco.
             max_price_value = config.get("max_price") or ""
-            price_segment = f"preis::{quote(str(max_price_value))}/" if max_price_value else ""
+            min_price_value = config.get("min_price") or ""
+            price_segment = (
+                f"preis:{quote(str(min_price_value))}:{quote(str(max_price_value))}/"
+                if (max_price_value or min_price_value)
+                else ""
+            )
             url = (
                 f"https://www.kleinanzeigen.de/s-autos/{price_segment}{slug}/k0c216"
                 f"?sortingField=PRICE_AMOUNT"
@@ -883,7 +893,8 @@ def run_pipeline(platforms=None):
 
     print(
         f"[Config actual] marca={config.get('make')!r} modelo={config.get('model')!r} "
-        f"max_price={config.get('max_price')!r} max_km={config.get('max_km')!r}",
+        f"min_price={config.get('min_price')!r} max_price={config.get('max_price')!r} "
+        f"max_km={config.get('max_km')!r}",
         flush=True,
     )
 
