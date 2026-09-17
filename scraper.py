@@ -67,6 +67,7 @@ def load_config():
             "make": "bmw",
             "model": "",
             "vigilancia": False,
+            "body_type": "",
             "min_price": "",
             "max_price": "20000",
             "max_km": "150000",
@@ -239,11 +240,26 @@ def make_car(platform, base_url, item, title_selector, price_selector):
 def matches_config(car, config):
     title = norm(car["title"])
     # Si el modelo está vacío, vale cualquier modelo de esa marca.
-    return all(
+    if not all(
         norm(value) in title
         for value in (config.get("make", ""), config.get("model", ""))
         if norm(value)
-    )
+    ):
+        return False
+
+    # Carrocería (opcional): lista de sinónimos separados por comas, p. ej.
+    # "touring, avant, kombi, variant". Se busca en TODO el texto del
+    # anuncio (título + descripción), no solo en el título, porque a veces
+    # la carrocería solo se menciona en la descripción.
+    body_type = (config.get("body_type") or "").strip()
+    if body_type:
+        synonyms = [norm(s) for s in body_type.split(",") if norm(s)]
+        if synonyms:
+            full_text = norm(f"{car['title']} {car.get('_listing_text', '')}")
+            if not any(synonym in full_text for synonym in synonyms):
+                return False
+
+    return True
 
 
 def within_limits(car, config):
