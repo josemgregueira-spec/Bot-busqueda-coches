@@ -308,8 +308,14 @@ def fetch_autoscout(config, session, max_pages=MAX_PAGES):
         print(f"[AutoScout24] Página {page}/{max_pages}...", flush=True)
 
         params = {
-            "sort": "age",
-            "desc": "1",
+            # Ordenar por precio ascendente (el más barato primero) en vez
+            # de por fecha: así, con pocas páginas, cubrimos TODO lo que
+            # entra en tu presupuesto, sin importar cuándo se publicó.
+            # Antes ordenábamos por "age" (más reciente primero), lo que
+            # hacía que anuncios más baratos pero más antiguos nunca
+            # llegaran a verse si no estaban entre los últimos publicados.
+            "sort": "price",
+            "desc": "0",
             "atype": "C",
             "page": page,
             "priceto": config.get("max_price") or None,
@@ -570,6 +576,8 @@ def pick_title(lines):
     for line in lines[:6]:
         if re.match(r"^\d{5}\s", line):  # código postal + ciudad
             continue
+        if re.match(r"^(heute|gestern),?\s*\d{1,2}:\d{2}$", line, re.I):  # "Heute, 09:13"
+            continue
         if line.strip().upper() in ("TOP", "ANZEIGE", "GESPONSERT"):
             continue
         if len(line) >= 12:
@@ -619,8 +627,26 @@ def fetch_kleinanzeigen(config, _session=None, max_pages=KLEINANZEIGEN_MAX_PAGES
             if stealth_available:
                 Stealth().apply_stealth_sync(page)
 
-            url = f"https://www.kleinanzeigen.de/s-autos/{slug}/k0c216"
+            # Kleinanzeigen permite acotar por precio directamente en la
+            # URL con el segmento "preis:MIN:MAX" (formato heredado de
+            # eBay Kleinanzeigen; no verificado en vivo tras el rediseño
+            # con Astro, pero suele mantenerse por compatibilidad SEO).
+            # Además se intenta ordenar por precio ascendente. IMPORTANTE:
+            # abre tú mismo esta URL exacta en un navegador normal para
+            # confirmar visualmente que el precio máximo y el orden se
+            # aplican de verdad -- la URL completa se imprime abajo.
+            max_price_value = config.get("max_price") or ""
+            price_segment = f"preis::{quote(str(max_price_value))}/" if max_price_value else ""
+            url = (
+                f"https://www.kleinanzeigen.de/s-autos/{price_segment}{slug}/k0c216"
+                f"?sortingField=PRICE_AMOUNT"
+            )
             print(f"[Kleinanzeigen] Cargando {url}...", flush=True)
+            print(
+                "[Kleinanzeigen] ⚠️ Comprueba manualmente esta URL en tu navegador: "
+                "¿respeta el precio máximo y el orden ascendente por precio?",
+                flush=True,
+            )
             # "networkidle" falla a menudo en webs modernas (analíticas,
             # anuncios, websockets de fondo que nunca dejan la red "en
             # silencio"). En vez de eso, esperamos solo a que el HTML básico
