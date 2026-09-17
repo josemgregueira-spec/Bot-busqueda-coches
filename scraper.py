@@ -253,8 +253,15 @@ def within_limits(car, config):
 
     max_km = number(config.get("max_km", ""))
     if max_km is not None:
-        match = re.search(r"(?:\d{1,3}(?:[.\s]\d{3})+|\d+)\s*km", car["_listing_text"], re.I)
-        km = int(re.sub(r"\D", "", match.group(0))) if match else None
+        # Se coge el número MÁS ALTO de todos los "<número> km" que
+        # aparezcan en el texto, no el primero. Algunos anuncios mencionan
+        # más de un número seguido de "km" (p. ej. "quedan 5.000 km para
+        # la ITV" además del kilometraje real del coche); coger el primero
+        # a ciegas puede hacer que se cuele un coche con muchos más
+        # kilómetros de los que el filtro dice permitir.
+        matches = re.findall(r"(?:\d{1,3}(?:[.\s]\d{3})+|\d+)\s*km", car["_listing_text"], re.I)
+        kms = [int(re.sub(r"\D", "", m)) for m in matches]
+        km = max(kms) if kms else None
         if km is None or km > max_km:
             return False
 
@@ -355,6 +362,9 @@ def fetch_autoscout(config, session, max_pages=MAX_PAGES):
             print(f"[AutoScout24 DEBUG] Fragmento: {response.text[:400]!r}", flush=True)
             break
 
+        print(f"[AutoScout24] {len(listings)} tarjetas <article> encontradas en esta página.", flush=True)
+
+        debug_shown = 0
         for item in listings:
             car = make_car(
                 "AutoScout24",
@@ -363,6 +373,20 @@ def fetch_autoscout(config, session, max_pages=MAX_PAGES):
                 "h2",
                 '[data-testid="regular-price"], [class*="Price"]',
             )
+
+            if debug_shown < 3:
+                if car is None:
+                    print("[AutoScout24 DEBUG] Item descartado por make_car (sin enlace válido o con IVA deducible).", flush=True)
+                else:
+                    print(
+                        f"[AutoScout24 DEBUG] título={car['title']!r} precio={car['price']!r} "
+                        f"num_precio={number(car['price'])!r} "
+                        f"coincide_marca={matches_config(car, config)} "
+                        f"dentro_de_limites={within_limits(car, config)}",
+                        flush=True,
+                    )
+                debug_shown += 1
+
             if qualifies(car, config):
                 cars.append(car)
 
