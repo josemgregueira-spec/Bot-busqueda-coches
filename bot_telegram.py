@@ -34,6 +34,7 @@ def load_config():
         return {
             "make": "BMW",
             "model": "318",
+            "min_price": "",
             "max_price": "20000",
             "max_km": "120000",
             "zip_code": "",
@@ -61,7 +62,10 @@ def menu(config):
                 InlineKeyboardButton(f"📝 Modelo: {config.get('model') or 'Todos'}", callback_data="model"),
             ],
             [
+                InlineKeyboardButton(f"💶 Mín.: {config.get('min_price') or '—'} €", callback_data="min_price"),
                 InlineKeyboardButton(f"💶 Máx.: {config.get('max_price') or '—'} €", callback_data="max_price"),
+            ],
+            [
                 InlineKeyboardButton(f"🛣️ Máx.: {config.get('max_km') or '—'} km", callback_data="max_km"),
             ],
             [InlineKeyboardButton("🔍 Buscar ahora", callback_data="search")],
@@ -203,6 +207,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     labels = {
         "make": "marca",
         "model": "modelo",
+        "min_price": "precio mínimo (deja vacío o escribe 'ninguno' para no filtrar por mínimo)",
         "max_price": "precio máximo",
         "max_km": "kilómetros máximos",
     }
