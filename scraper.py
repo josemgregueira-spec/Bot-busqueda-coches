@@ -15,10 +15,21 @@ from bs4 import BeautifulSoup
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID", "")
 MAX_PAGES = int(os.getenv("MAX_PAGES", "3"))
+# Igual que en Kleinanzeigen: si hay carrocería o modelo múltiple activos
+# (filtros que AutoScout24 no aplica en su propia web), se amplía el número
+# de páginas para compensar. El año mínimo NO cuenta aquí porque ya se
+# envía a la propia web (parámetro fregfrom).
+MAX_PAGES_FILTRADO = int(os.getenv("MAX_PAGES_FILTRADO", "8"))
 # Kleinanzeigen bloquea mucho más rápido que las otras dos plataformas
 # (a veces tras solo 2-3 anuncios), así que por defecto se le pide bastante
 # menos y con pausas más largas. Ajustable con la variable de entorno.
 KLEINANZEIGEN_MAX_PAGES = int(os.getenv("KLEINANZEIGEN_MAX_PAGES", "3"))
+# Cuando hay algún filtro que Kleinanzeigen NO aplica en su propia web (año
+# mínimo, carrocería, o modelo con varias opciones separadas por comas), el
+# filtrado final descarta muchos más anuncios de los que verías con un
+# filtro simple. Para compensarlo, en esos casos se amplía el número de
+# páginas a mirar, aunque tarde un poco más y sea algo menos discreto.
+KLEINANZEIGEN_MAX_PAGES_FILTRADO = int(os.getenv("KLEINANZEIGEN_MAX_PAGES_FILTRADO", "6"))
 SEEN_RETENTION_DAYS = int(os.getenv("SEEN_RETENTION_DAYS", "90"))
 
 
@@ -277,6 +288,25 @@ def make_car(platform, base_url, item, title_selector, price_selector):
     }
 
 
+def needs_wider_scan(config, check_year=True):
+    """
+    True si hay algún filtro configurado que NO se puede aplicar en la
+    propia búsqueda de la web (solo se comprueba después, sobre lo ya
+    descargado): carrocería, modelo con varias opciones separadas por
+    comas, y -- solo si check_year=True -- año mínimo (en AutoScout24 el
+    año SÍ se envía a la propia web, así que ahí no hace falta contarlo).
+    En esos casos conviene mirar más páginas para compensar que el
+    filtrado final va a descartar bastante más.
+    """
+    if check_year and (config.get("min_year") or "").strip():
+        return True
+    if (config.get("body_type") or "").strip():
+        return True
+    if "," in (config.get("model") or ""):
+        return True
+    return False
+
+
 def matches_config(car, config):
     title = norm(car["title"])
 
@@ -377,12 +407,24 @@ def autoscout_slug(value):
     return alias if alias else quote(key, safe="-")
 
 
-def fetch_autoscout(config, session, max_pages=MAX_PAGES):
+def fetch_autoscout(config, session, max_pages=None):
     make = config.get("make", "").strip().lower()
     model = config.get("model", "").strip().lower()
     if not make:
         log.error("AutoScout24 requiere make.")
         return []
+
+    if max_pages is None:
+        if needs_wider_scan(config, check_year=False):
+            max_pages = MAX_PAGES_FILTRADO
+            print(
+                f"[AutoScout24] Hay filtros que no se aplican en la propia web "
+                f"(carrocería/modelo múltiple) -> se amplía a {max_pages} páginas "
+                f"para compensar.",
+                flush=True,
+            )
+        else:
+            max_pages = MAX_PAGES
 
     url_make_only = f"https://www.autoscout24.de/lst/{autoscout_slug(make)}"
     # Si el modelo tiene varias opciones separadas por comas (p. ej.
@@ -697,7 +739,7 @@ def pick_title(lines):
     return lines[0] if lines else "Vehículo"
 
 
-def fetch_kleinanzeigen(config, _session=None, max_pages=KLEINANZEIGEN_MAX_PAGES):
+def fetch_kleinanzeigen(config, _session=None, max_pages=None):
     """
     Kleinanzeigen rediseñó su web con Astro (renderizado del lado del
     cliente): los anuncios NO están en el HTML inicial, se cargan con
@@ -712,6 +754,18 @@ def fetch_kleinanzeigen(config, _session=None, max_pages=KLEINANZEIGEN_MAX_PAGES
     make = config.get("make", "").strip()
     if not make:
         return []
+
+    if max_pages is None:
+        if needs_wider_scan(config):
+            max_pages = KLEINANZEIGEN_MAX_PAGES_FILTRADO
+            print(
+                f"[Kleinanzeigen] Hay filtros que no se aplican en la propia web "
+                f"(año/carrocería/modelo múltiple) -> se amplía a {max_pages} páginas "
+                f"para compensar.",
+                flush=True,
+            )
+        else:
+            max_pages = KLEINANZEIGEN_MAX_PAGES
 
     # Solo se busca por MARCA en la propia web. El modelo (que ahora puede
     # tener varias opciones separadas por comas, p. ej. "320, 325, 330")
