@@ -18,7 +18,7 @@ MAX_PAGES = int(os.getenv("MAX_PAGES", "3"))
 # Kleinanzeigen bloquea mucho más rápido que las otras dos plataformas
 # (a veces tras solo 2-3 anuncios), así que por defecto se le pide bastante
 # menos y con pausas más largas. Ajustable con la variable de entorno.
-KLEINANZEIGEN_MAX_PAGES = int(os.getenv("KLEINANZEIGEN_MAX_PAGES", "1"))
+KLEINANZEIGEN_MAX_PAGES = int(os.getenv("KLEINANZEIGEN_MAX_PAGES", "3"))
 SEEN_RETENTION_DAYS = int(os.getenv("SEEN_RETENTION_DAYS", "90"))
 
 
@@ -239,13 +239,20 @@ def make_car(platform, base_url, item, title_selector, price_selector):
 
 def matches_config(car, config):
     title = norm(car["title"])
-    # Si el modelo está vacío, vale cualquier modelo de esa marca.
-    if not all(
-        norm(value) in title
-        for value in (config.get("make", ""), config.get("model", ""))
-        if norm(value)
-    ):
+
+    make = norm(config.get("make", ""))
+    if make and make not in title:
         return False
+
+    # El modelo admite varias opciones separadas por comas (p. ej.
+    # "316, 318, 320, 325, 330, 3er"), porque los anuncios casi nunca
+    # escriben "Serie 3" tal cual -- lo normal es que pongan el número de
+    # modelo concreto. Con esto basta con que aparezca UNA cualquiera.
+    model_raw = (config.get("model") or "").strip()
+    if model_raw:
+        model_synonyms = [norm(s) for s in model_raw.split(",") if norm(s)]
+        if model_synonyms and not any(synonym in title for synonym in model_synonyms):
+            return False
 
     # Carrocería (opcional): lista de sinónimos separados por comas, p. ej.
     # "touring, avant, kombi, variant". Se busca en TODO el texto del
@@ -328,7 +335,13 @@ def fetch_autoscout(config, session, max_pages=MAX_PAGES):
         return []
 
     url_make_only = f"https://www.autoscout24.de/lst/{autoscout_slug(make)}"
-    url_with_model = f"{url_make_only}/{quote(model, safe='-')}" if model else url_make_only
+    # Si el modelo tiene varias opciones separadas por comas (p. ej.
+    # "320, 325, 330" para cubrir toda la Serie 3), no se puede meter en la
+    # URL de AutoScout24 (solo admite un modelo en la ruta) -- en ese caso
+    # se busca solo por marca y se deja que matches_config() filtre después
+    # por cualquiera de esos modelos.
+    single_model = model if model and "," not in model else ""
+    url_with_model = f"{url_make_only}/{quote(single_model, safe='-')}" if single_model else url_make_only
     fallback_used = False
 
     cars = []
@@ -644,9 +657,16 @@ def fetch_kleinanzeigen(config, _session=None, max_pages=KLEINANZEIGEN_MAX_PAGES
     un anuncio individual de Kleinanzeigen contienen "/s-anzeige/" en su URL,
     y eso lleva años sin cambiar pese a los rediseños del resto de la web.
     """
-    query = " ".join(filter(None, (config.get("make", "").strip(), config.get("model", "").strip())))
-    if not query:
+    make = config.get("make", "").strip()
+    if not make:
         return []
+
+    # Solo se busca por MARCA en la propia web. El modelo (que ahora puede
+    # tener varias opciones separadas por comas, p. ej. "320, 325, 330")
+    # se filtra después con matches_config(), no aquí -- meterlo en la
+    # búsqueda de la web rompería si hay comas, y además así cubrimos más
+    # anuncios por si el modelo se menciona solo en la descripción.
+    slug = quote(re.sub(r"\s+", "-", make.strip().lower()), safe="-")
 
     try:
         from playwright.sync_api import sync_playwright
@@ -660,8 +680,15 @@ def fetch_kleinanzeigen(config, _session=None, max_pages=KLEINANZEIGEN_MAX_PAGES
     except ImportError:
         stealth_available = False
 
-    slug = quote(re.sub(r"\s+", "-", query.strip().lower()), safe="-")
-    cars = []
+    max_price_value = config.get("max_price") or ""
+    min_price_value = config.get("min_price") or ""
+    price_segment = (
+        f"preis:{quote(str(min_price_value))}:{quote(str(max_price_value))}/"
+        if (max_price_value or min_price_value)
+        else ""
+    )
+
+    raw_items_all = []
 
     with sync_playwright() as playwright:
         browser = None
@@ -674,163 +701,96 @@ def fetch_kleinanzeigen(config, _session=None, max_pages=KLEINANZEIGEN_MAX_PAGES
             if stealth_available:
                 Stealth().apply_stealth_sync(page)
 
-            # Kleinanzeigen permite acotar por precio directamente en la
-            # URL con el segmento "preis:MIN:MAX" (formato heredado de
-            # eBay Kleinanzeigen; ya confirmado que funciona tras probarlo
-            # a mano en el navegador). Con un mínimo puesto, se evita que
-            # las primeras páginas se llenen de piezas sueltas (llantas,
-            # faros, etc.) que suelen costar muy poco.
-            max_price_value = config.get("max_price") or ""
-            min_price_value = config.get("min_price") or ""
-            price_segment = (
-                f"preis:{quote(str(min_price_value))}:{quote(str(max_price_value))}/"
-                if (max_price_value or min_price_value)
-                else ""
-            )
-            url = (
-                f"https://www.kleinanzeigen.de/s-autos/{price_segment}{slug}/k0c216"
-                f"?sortingField=PRICE_AMOUNT"
-            )
-            print(f"[Kleinanzeigen] Cargando {url}...", flush=True)
-            print(
-                "[Kleinanzeigen] ⚠️ Comprueba manualmente esta URL en tu navegador: "
-                "¿respeta el precio máximo y el orden ascendente por precio?",
-                flush=True,
-            )
-            # "networkidle" falla a menudo en webs modernas (analíticas,
-            # anuncios, websockets de fondo que nunca dejan la red "en
-            # silencio"). En vez de eso, esperamos solo a que el HTML básico
-            # cargue y luego a que aparezcan los enlaces de anuncio reales,
-            # que es lo que de verdad necesitamos.
-            page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            human_pause(2.0, 4.0)
-
-            block_reason = blocked_title(page.title())
-            if block_reason:
-                log.error(
-                    "Kleinanzeigen ha bloqueado la petición (título: %r, marcador: %r). "
-                    "Se detiene esta plataforma en este ciclo.",
-                    page.title(), block_reason,
+            for page_number in range(1, max_pages + 1):
+                # Kleinanzeigen numera la paginación con un segmento
+                # "seite:N/" en la ruta (a partir de la página 2).
+                page_segment = f"seite:{page_number}/" if page_number > 1 else ""
+                url = (
+                    f"https://www.kleinanzeigen.de/s-autos/{page_segment}{price_segment}{slug}/k0c216"
+                    f"?sortingField=PRICE_AMOUNT"
                 )
-                return []
-
-            try:
-                page.wait_for_selector('a[href*="/s-anzeige/"]', timeout=15000)
-            except Exception:
-                print(
-                    "[Kleinanzeigen] No aparecieron enlaces de anuncio tras 15s "
-                    "de espera (puede que no haya resultados, o que la página "
-                    "tarde más de lo esperado en cargar).",
-                    flush=True,
-                )
-
-            # Se extraen los datos directamente en el navegador (más fiable
-            # que descargar el HTML y volver a parsearlo aparte), subiendo
-            # desde cada enlace "/s-anzeige/" hasta su contenedor (article/
-            # li/div) para sacar el texto e imagen de ese anuncio concreto.
-            raw_items = page.eval_on_selector_all(
-                'a[href*="/s-anzeige/"]',
-                """
-                els => els.map(a => {
-                    // Se prefieren contenedores "de verdad" de la tarjeta del
-                    // anuncio. OJO: closest('article, li, div') es un error
-                    // habitual, porque 'div' es tan genérico que casi siempre
-                    // encuentra un <div> diminuto (el que envuelve solo la
-                    // imagen o el enlace) ANTES de llegar al contenedor real
-                    // que tiene el precio y el título -> por eso salía
-                    // siempre "Consultar" como precio.
-                    let container = a.closest('article, li[data-adid], li');
-
-                    if (!container) {
-                        // Último recurso: subir manualmente hasta encontrar
-                        // un antepasado cuyo texto SÍ contenga un símbolo de
-                        // moneda (señal de que ya llegamos a la tarjeta
-                        // completa, no solo a un trozo suyo).
-                        let node = a;
-                        for (let i = 0; i < 6 && node.parentElement; i++) {
-                            node = node.parentElement;
-                            if (node.innerText && node.innerText.includes('€')) {
-                                container = node;
-                                break;
-                            }
-                        }
-                        if (!container) container = a.parentElement || a;
-                    }
-
-                    const img = container.querySelector('img');
-                    return {
-                        href: a.href,
-                        text: container.innerText || a.innerText || '',
-                        img: img ? (img.src || img.getAttribute('data-src')) : null
-                    };
-                })
-                """,
-            )
-            print(f"[Kleinanzeigen] {len(raw_items)} enlaces de anuncio detectados.", flush=True)
-
-            # DEBUG TEMPORAL: muestra el texto crudo de los primeros 3
-            # anuncios para poder ver exactamente qué estamos capturando,
-            # sin tener que adivinar más a ciegas.
-            for i, raw in enumerate(raw_items[:3]):
-                preview = (raw["text"] or "")[:200].replace("\n", " | ")
-                print(f"[Kleinanzeigen DEBUG] Item {i}: {preview!r}", flush=True)
-
-            seen_links = set()
-            rejected_no_price = 0
-            rejected_no_match = 0
-            debug_shown = 0
-
-            for raw in raw_items:
-                link = clean_link(raw["href"])
-                if link in seen_links or not link.startswith(("http://", "https://")):
-                    continue
-                seen_links.add(link)
-
-                listing_text = raw["text"] or ""
-                if has_deductible_vat(listing_text):
-                    continue
-
-                lines = [line.strip() for line in listing_text.split("\n") if line.strip()]
-                title = pick_title(lines)
-                price = next((line for line in lines if "€" in line), "Consultar")
-
-                car = {
-                    "id": f"kleinanzeigen:{link}",
-                    "title": title,
-                    "price": price,
-                    "link": link,
-                    "image": raw["img"],
-                    "platform": "Kleinanzeigen",
-                    "_listing_text": listing_text,
-                    "seller_type": "Sin IVA deducible detectado",
-                }
-
-                match_ok = matches_config(car, config)
-                limits_ok = within_limits(car, config)
-
-                if debug_shown < 3:
+                print(f"[Kleinanzeigen] Página {page_number}/{max_pages}: {url}", flush=True)
+                if page_number == 1:
                     print(
-                        f"[Kleinanzeigen DEBUG] título={title!r} precio={price!r} "
-                        f"num_precio={number(price)!r} coincide_marca={match_ok} "
-                        f"dentro_de_limites={limits_ok}",
+                        "[Kleinanzeigen] ⚠️ Comprueba manualmente esta URL en tu navegador: "
+                        "¿respeta el precio máximo y el orden ascendente por precio?",
                         flush=True,
                     )
-                    debug_shown += 1
 
-                if match_ok and limits_ok:
-                    cars.append(car)
-                elif not limits_ok:
-                    rejected_no_price += 1
-                elif not match_ok:
-                    rejected_no_match += 1
+                # "networkidle" falla a menudo en webs modernas (analíticas,
+                # anuncios, websockets de fondo que nunca dejan la red "en
+                # silencio"). En vez de eso, esperamos solo a que el HTML
+                # básico cargue y luego a que aparezcan los enlaces reales.
+                page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                human_pause(3.0, 6.0)
 
-            if rejected_no_price or rejected_no_match:
-                print(
-                    f"[Kleinanzeigen DEBUG] Descartados por precio/km no válido: "
-                    f"{rejected_no_price}. Descartados por no coincidir marca/modelo: "
-                    f"{rejected_no_match}.",
-                    flush=True,
+                block_reason = blocked_title(page.title())
+                if block_reason:
+                    log.error(
+                        "Kleinanzeigen ha bloqueado la petición (título: %r, marcador: %r). "
+                        "Se detiene esta plataforma en este ciclo.",
+                        page.title(), block_reason,
+                    )
+                    break
+
+                try:
+                    page.wait_for_selector('a[href*="/s-anzeige/"]', timeout=15000)
+                except Exception:
+                    print(
+                        f"[Kleinanzeigen] No aparecieron enlaces de anuncio en la página "
+                        f"{page_number} tras 15s de espera (puede que no haya más "
+                        f"resultados, o que tarde más de lo esperado en cargar).",
+                        flush=True,
+                    )
+                    break
+
+                # Se extraen los datos directamente en el navegador (más
+                # fiable que descargar el HTML y volver a parsearlo aparte),
+                # subiendo desde cada enlace "/s-anzeige/" hasta su
+                # contenedor (article/li/div) para sacar el texto e imagen.
+                raw_items = page.eval_on_selector_all(
+                    'a[href*="/s-anzeige/"]',
+                    """
+                    els => els.map(a => {
+                        // Se prefieren contenedores "de verdad" de la
+                        // tarjeta. OJO: closest('article, li, div') es un
+                        // error habitual, porque 'div' es tan genérico que
+                        // casi siempre encuentra un <div> diminuto (el que
+                        // envuelve solo la imagen o el enlace) ANTES de
+                        // llegar al contenedor real que tiene el precio y
+                        // el título -> por eso salía siempre "Consultar".
+                        let container = a.closest('article, li[data-adid], li');
+
+                        if (!container) {
+                            // Último recurso: subir manualmente hasta
+                            // encontrar un antepasado cuyo texto SÍ
+                            // contenga un símbolo de moneda (señal de que
+                            // ya llegamos a la tarjeta completa).
+                            let node = a;
+                            for (let i = 0; i < 6 && node.parentElement; i++) {
+                                node = node.parentElement;
+                                if (node.innerText && node.innerText.includes('€')) {
+                                    container = node;
+                                    break;
+                                }
+                            }
+                            if (!container) container = a.parentElement || a;
+                        }
+
+                        const img = container.querySelector('img');
+                        return {
+                            href: a.href,
+                            text: container.innerText || a.innerText || '',
+                            img: img ? (img.src || img.getAttribute('data-src')) : null
+                        };
+                    })
+                    """,
                 )
+                print(f"[Kleinanzeigen] {len(raw_items)} enlaces en la página {page_number}.", flush=True)
+                raw_items_all.extend(raw_items)
+
+                if page_number < max_pages:
+                    human_pause(4.0, 8.0)
 
         except Exception as error:
             log.error("No se pudo automatizar Kleinanzeigen: %s", error)
@@ -838,6 +798,72 @@ def fetch_kleinanzeigen(config, _session=None, max_pages=KLEINANZEIGEN_MAX_PAGES
         finally:
             if browser:
                 browser.close()
+
+    print(f"[Kleinanzeigen] {len(raw_items_all)} enlaces totales detectados (todas las páginas).", flush=True)
+
+    # DEBUG TEMPORAL: muestra el texto crudo de los primeros 3 anuncios
+    # para poder ver exactamente qué estamos capturando.
+    for i, raw in enumerate(raw_items_all[:3]):
+        preview = (raw["text"] or "")[:200].replace("\n", " | ")
+        print(f"[Kleinanzeigen DEBUG] Item {i}: {preview!r}", flush=True)
+
+    cars = []
+    seen_links = set()
+    rejected_no_price = 0
+    rejected_no_match = 0
+    debug_shown = 0
+
+    for raw in raw_items_all:
+        link = clean_link(raw["href"])
+        if link in seen_links or not link.startswith(("http://", "https://")):
+            continue
+        seen_links.add(link)
+
+        listing_text = raw["text"] or ""
+        if has_deductible_vat(listing_text):
+            continue
+
+        lines = [line.strip() for line in listing_text.split("\n") if line.strip()]
+        title = pick_title(lines)
+        price = next((line for line in lines if "€" in line), "Consultar")
+
+        car = {
+            "id": f"kleinanzeigen:{link}",
+            "title": title,
+            "price": price,
+            "link": link,
+            "image": raw["img"],
+            "platform": "Kleinanzeigen",
+            "_listing_text": listing_text,
+            "seller_type": "Sin IVA deducible detectado",
+        }
+
+        match_ok = matches_config(car, config)
+        limits_ok = within_limits(car, config)
+
+        if debug_shown < 3:
+            print(
+                f"[Kleinanzeigen DEBUG] título={title!r} precio={price!r} "
+                f"num_precio={number(price)!r} coincide_marca={match_ok} "
+                f"dentro_de_limites={limits_ok}",
+                flush=True,
+            )
+            debug_shown += 1
+
+        if match_ok and limits_ok:
+            cars.append(car)
+        elif not limits_ok:
+            rejected_no_price += 1
+        elif not match_ok:
+            rejected_no_match += 1
+
+    if rejected_no_price or rejected_no_match:
+        print(
+            f"[Kleinanzeigen DEBUG] Descartados por precio/km no válido: "
+            f"{rejected_no_price}. Descartados por no coincidir marca/modelo: "
+            f"{rejected_no_match}.",
+            flush=True,
+        )
 
     print(f"[Kleinanzeigen] {len(cars)} anuncios válidos encontrados.", flush=True)
     return cars
