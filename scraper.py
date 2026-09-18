@@ -71,6 +71,7 @@ def load_config():
             "min_price": "",
             "max_price": "20000",
             "max_km": "150000",
+            "min_year": "",
             "zip_code": "",
             "radius": "",
         },
@@ -116,6 +117,45 @@ def norm(value):
 def number(value):
     match = re.search(r"(?:\d{1,3}(?:[.\s]\d{3})+|\d+)", str(value))
     return int(re.sub(r"\D", "", match.group(0))) if match else None
+
+
+def extract_year(text):
+    """
+    Intenta sacar el año de matriculación/fabricación del texto del
+    anuncio, probando varios formatos habituales en AutoScout24, mobile.de
+    y Kleinanzeigen, del más fiable al menos fiable:
+      - "EZ 06/2010" / "EZ: 2010"   (Erstzulassung, muy común)
+      - "Erstzulassung 2010"
+      - "Baujahr 2010" / "BJ 2010"
+      - "'11" al principio del texto (abreviatura típica de Kleinanzeigen)
+      - cualquier año suelto entre 1980 y el año actual+1, como último recurso
+    Devuelve el año como int, o None si no se encuentra nada razonable.
+    """
+    current_year = time.localtime().tm_year
+
+    match = re.search(r"\bEZ\.?:?\s*(?:\d{1,2}[./])?(\d{4})\b", text, re.I)
+    if match:
+        return int(match.group(1))
+
+    match = re.search(r"erstzulassung\D{0,10}(\d{4})", text, re.I)
+    if match:
+        return int(match.group(1))
+
+    match = re.search(r"\b(?:baujahr|bj\.?)\D{0,5}(\d{4})\b", text, re.I)
+    if match:
+        return int(match.group(1))
+
+    match = re.match(r"\s*'(\d{2})\b", text)
+    if match:
+        two_digits = int(match.group(1))
+        return 2000 + two_digits if two_digits <= (current_year - 2000) else 1900 + two_digits
+
+    for candidate in re.findall(r"\b(19[89]\d|20[0-2]\d)\b", text):
+        year = int(candidate)
+        if 1980 <= year <= current_year + 1:
+            return year
+
+    return None
 
 
 def blocked_title(title):
@@ -294,6 +334,16 @@ def within_limits(car, config):
         if km is None or km > max_km:
             return False
 
+    min_year = number(config.get("min_year", ""))
+    if min_year is not None:
+        full_text = f"{car['title']} {car.get('_listing_text', '')}"
+        year = extract_year(full_text)
+        # Si no se puede determinar el año, se descarta por precaución: es
+        # mejor perderse algún anuncio raro que colar coches más viejos de
+        # lo que pides sin darte cuenta.
+        if year is None or year < min_year:
+            return False
+
     return True
 
 
@@ -363,6 +413,7 @@ def fetch_autoscout(config, session, max_pages=MAX_PAGES):
             "priceto": config.get("max_price") or None,
             "pricefrom": config.get("min_price") or None,
             "kmto": config.get("max_km") or None,
+            "fregfrom": config.get("min_year") or None,
             "zip": config.get("zip_code") or None,
             "zipr": config.get("radius") or None,
             "ust": "0",
@@ -417,6 +468,7 @@ def fetch_autoscout(config, session, max_pages=MAX_PAGES):
                     print(
                         f"[AutoScout24 DEBUG] título={car['title']!r} precio={car['price']!r} "
                         f"num_precio={number(car['price'])!r} "
+                        f"año={extract_year(car['title'] + ' ' + car.get('_listing_text', ''))!r} "
                         f"coincide_marca={matches_config(car, config)} "
                         f"dentro_de_limites={within_limits(car, config)}",
                         flush=True,
@@ -844,8 +896,8 @@ def fetch_kleinanzeigen(config, _session=None, max_pages=KLEINANZEIGEN_MAX_PAGES
         if debug_shown < 3:
             print(
                 f"[Kleinanzeigen DEBUG] título={title!r} precio={price!r} "
-                f"num_precio={number(price)!r} coincide_marca={match_ok} "
-                f"dentro_de_limites={limits_ok}",
+                f"num_precio={number(price)!r} año={extract_year(title + ' ' + listing_text)!r} "
+                f"coincide_marca={match_ok} dentro_de_limites={limits_ok}",
                 flush=True,
             )
             debug_shown += 1
@@ -936,7 +988,8 @@ def run_pipeline(platforms=None):
     print(
         f"[Config actual] marca={config.get('make')!r} modelo={config.get('model')!r} "
         f"min_price={config.get('min_price')!r} max_price={config.get('max_price')!r} "
-        f"max_km={config.get('max_km')!r}",
+        f"max_km={config.get('max_km')!r} min_year={config.get('min_year')!r} "
+        f"body_type={config.get('body_type')!r}",
         flush=True,
     )
 
