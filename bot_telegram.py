@@ -39,6 +39,7 @@ def load_config():
             "max_price": "20000",
             "max_km": "120000",
             "min_year": "",
+            "solo_rebu": True,
             "zip_code": "",
             "radius": "",
         }
@@ -57,6 +58,7 @@ def allowed(update):
 
 
 def menu(config):
+    solo_rebu = config.get("solo_rebu", True)
     return InlineKeyboardMarkup(
         [
             [
@@ -73,6 +75,12 @@ def menu(config):
             [
                 InlineKeyboardButton(f"🛣️ Máx.: {config.get('max_km') or '—'} km", callback_data="max_km"),
                 InlineKeyboardButton(f"📅 Año mín.: {config.get('min_year') or '—'}", callback_data="min_year"),
+            ],
+            [
+                InlineKeyboardButton(
+                    f"{'🧾' if solo_rebu else '📄'} REBU: {'Solo REBU' if solo_rebu else 'También con IVA'}",
+                    callback_data="toggle_rebu",
+                ),
             ],
             [InlineKeyboardButton("🔍 Buscar ahora", callback_data="search")],
         ]
@@ -152,6 +160,15 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     action = query.data
+
+    # --- Interruptor Solo REBU / También con IVA (un solo clic) -----------
+    if action == "toggle_rebu":
+        config = load_config()
+        config["solo_rebu"] = not config.get("solo_rebu", True)
+        save_config(config)
+        estado = "Solo REBU (sin IVA deducible)" if config["solo_rebu"] else "También con IVA deducible (no REBU)"
+        await query.message.reply_text(f"🔄 Filtro actualizado: {estado}", reply_markup=menu(config))
+        return
 
     # --- Botón "Buscar ahora": primero se elige dónde buscar --------------
     if action == "search":
