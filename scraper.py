@@ -83,6 +83,7 @@ def load_config():
             "max_price": "20000",
             "max_km": "150000",
             "min_year": "",
+            "solo_rebu": True,
             "zip_code": "",
             "radius": "",
         },
@@ -265,9 +266,6 @@ def get(session, url, params, platform):
 def make_car(platform, base_url, item, title_selector, price_selector):
     listing_text = clean_text(item, "")
 
-    if has_deductible_vat(listing_text):
-        return None
-
     link_element = item.select_one("a[href]")
     if not link_element:
         return None
@@ -275,6 +273,8 @@ def make_car(platform, base_url, item, title_selector, price_selector):
     link = clean_link(urljoin(base_url, link_element["href"]))
     if not link.startswith(("http://", "https://")):
         return None
+
+    tiene_iva_deducible = bool(has_deductible_vat(listing_text))
 
     return {
         "id": f"{platform.lower()}:{link}",
@@ -284,7 +284,8 @@ def make_car(platform, base_url, item, title_selector, price_selector):
         "image": image_url(item.select_one("img")),
         "platform": platform,
         "_listing_text": listing_text,
-        "seller_type": "Sin IVA deducible detectado",
+        "tiene_iva_deducible": tiene_iva_deducible,
+        "seller_type": "Con IVA deducible (no REBU)" if tiene_iva_deducible else "Sin IVA deducible (REBU)",
     }
 
 
@@ -377,8 +378,25 @@ def within_limits(car, config):
     return True
 
 
+def passes_rebu_filter(car, config):
+    """
+    Por defecto (solo_rebu=True), se descartan los anuncios con IVA
+    deducible (no son REBU). Si el usuario activa "incluir también con
+    IVA" desde el panel (solo_rebu=False), se dejan pasar todos, por si le
+    sale un cliente al que sí le interese un coche con IVA deducible.
+    """
+    if config.get("solo_rebu", True):
+        return not car.get("tiene_iva_deducible", False)
+    return True
+
+
 def qualifies(car, config):
-    return bool(car) and matches_config(car, config) and within_limits(car, config)
+    return (
+        bool(car)
+        and passes_rebu_filter(car, config)
+        and matches_config(car, config)
+        and within_limits(car, config)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -505,12 +523,13 @@ def fetch_autoscout(config, session, max_pages=None):
 
             if debug_shown < 3:
                 if car is None:
-                    print("[AutoScout24 DEBUG] Item descartado por make_car (sin enlace válido o con IVA deducible).", flush=True)
+                    print("[AutoScout24 DEBUG] Item descartado por make_car (sin enlace válido).", flush=True)
                 else:
                     print(
                         f"[AutoScout24 DEBUG] título={car['title']!r} precio={car['price']!r} "
                         f"num_precio={number(car['price'])!r} "
                         f"año={extract_year(car['title'] + ' ' + car.get('_listing_text', ''))!r} "
+                        f"rebu_ok={passes_rebu_filter(car, config)} "
                         f"coincide_marca={matches_config(car, config)} "
                         f"dentro_de_limites={within_limits(car, config)}",
                         flush=True,
@@ -926,12 +945,12 @@ def fetch_kleinanzeigen(config, _session=None, max_pages=None):
         seen_links.add(link)
 
         listing_text = raw["text"] or ""
-        if has_deductible_vat(listing_text):
-            continue
 
         lines = [line.strip() for line in listing_text.split("\n") if line.strip()]
         title = pick_title(lines)
         price = next((line for line in lines if "€" in line), "Consultar")
+
+        tiene_iva_deducible = bool(has_deductible_vat(listing_text))
 
         car = {
             "id": f"kleinanzeigen:{link}",
@@ -941,9 +960,11 @@ def fetch_kleinanzeigen(config, _session=None, max_pages=None):
             "image": raw["img"],
             "platform": "Kleinanzeigen",
             "_listing_text": listing_text,
-            "seller_type": "Sin IVA deducible detectado",
+            "tiene_iva_deducible": tiene_iva_deducible,
+            "seller_type": "Con IVA deducible (no REBU)" if tiene_iva_deducible else "Sin IVA deducible (REBU)",
         }
 
+        rebu_ok = passes_rebu_filter(car, config)
         match_ok = matches_config(car, config)
         limits_ok = within_limits(car, config)
 
@@ -951,12 +972,12 @@ def fetch_kleinanzeigen(config, _session=None, max_pages=None):
             print(
                 f"[Kleinanzeigen DEBUG] título={title!r} precio={price!r} "
                 f"num_precio={number(price)!r} año={extract_year(title + ' ' + listing_text)!r} "
-                f"coincide_marca={match_ok} dentro_de_limites={limits_ok}",
+                f"rebu_ok={rebu_ok} coincide_marca={match_ok} dentro_de_limites={limits_ok}",
                 flush=True,
             )
             debug_shown += 1
 
-        if match_ok and limits_ok:
+        if rebu_ok and match_ok and limits_ok:
             cars.append(car)
         elif not limits_ok:
             rejected_no_price += 1
@@ -1043,7 +1064,7 @@ def run_pipeline(platforms=None):
         f"[Config actual] marca={config.get('make')!r} modelo={config.get('model')!r} "
         f"min_price={config.get('min_price')!r} max_price={config.get('max_price')!r} "
         f"max_km={config.get('max_km')!r} min_year={config.get('min_year')!r} "
-        f"body_type={config.get('body_type')!r}",
+        f"body_type={config.get('body_type')!r} solo_rebu={config.get('solo_rebu', True)!r}",
         flush=True,
     )
 
