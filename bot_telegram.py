@@ -38,6 +38,7 @@ def load_config():
             "min_price": "",
             "max_price": "20000",
             "max_km": "120000",
+            "min_year": "",
             "zip_code": "",
             "radius": "",
         }
@@ -71,6 +72,7 @@ def menu(config):
             ],
             [
                 InlineKeyboardButton(f"🛣️ Máx.: {config.get('max_km') or '—'} km", callback_data="max_km"),
+                InlineKeyboardButton(f"📅 Año mín.: {config.get('min_year') or '—'}", callback_data="min_year"),
             ],
             [InlineKeyboardButton("🔍 Buscar ahora", callback_data="search")],
         ]
@@ -217,6 +219,8 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "min_price": "precio mínimo (deja vacío o escribe 'ninguno' para no filtrar por mínimo)",
         "max_price": "precio máximo",
         "max_km": "kilómetros máximos",
+        "min_year": "año mínimo de matriculación (p. ej. '2015' para no ver coches más "
+                    "antiguos; deja vacío o escribe 'ninguno' para no filtrar por año)",
     }
     await query.message.reply_text(
         f"Escribe el nuevo valor para {labels[action]}. Escribe 'ninguno' para vaciarlo."
